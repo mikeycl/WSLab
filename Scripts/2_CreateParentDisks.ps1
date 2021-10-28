@@ -95,7 +95,7 @@ If (-not $isAdmin) {
         Start-Transcript -Path "$PSScriptRoot\CreateParentDisks.log"
         $StartDateTime = Get-Date
         WriteInfo "Script started at $StartDateTime"
-        WriteInfo "`nWSLab Version $wslabVersion"
+        WriteInfo "`nMSLab Version $mslabVersion"
 
     #Load LabConfig....
         . "$PSScriptRoot\LabConfig.ps1"
@@ -164,7 +164,12 @@ If (-not $isAdmin) {
 
 #region Check prerequisites
 
-    #check Hyper-V    
+    #Check if not running in root folder
+    if (($PSScriptRoot).Length -eq 3) {
+        WriteErrorAndExit "`t MSLab canot run in root folder. Please put MSLab scripts into a folder. Exiting"
+    }
+
+    #check Hyper-V
         WriteInfoHighlighted "Checking if Hyper-V is installed"
         if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).state -eq "Enabled"){
             WriteSuccess "`t Hyper-V is Installed"
@@ -240,8 +245,8 @@ If (-not $isAdmin) {
     WriteInfoHighlighted "Checking if volume filesystem is NTFS or ReFS"
     $driveletter=$PSScriptRoot -split ":" | Select-Object -First 1
     if ($PSScriptRoot -like "c:\ClusterStorage*"){
-        WriteSuccess "`t Volume Cluster Shared Volume. Mountdir will be $env:Temp\WSLAbMountdir" 
-        $mountdir="$env:Temp\WSLAbMountdir"
+        WriteSuccess "`t Volume Cluster Shared Volume. Mountdir will be $env:Temp\MSLabMountdir" 
+        $mountdir="$env:Temp\MSLabMountdir"
         $VolumeFileSystem="CSVFS"
     }else{
         $mountdir="$PSScriptRoot\Temp\MountDir"
@@ -269,10 +274,10 @@ If (-not $isAdmin) {
             }
             $ISOServer = Mount-DiskImage -ImagePath $ServerISOItem.FullName -PassThru
         }else{
-            WriteInfoHighlighted "Please select ISO image with Windows Server 2016, 2019 or Server Insider"
+            WriteInfoHighlighted "Please select ISO image with Windows Server 2016, 2019, 2022 or Server Insider"
             [reflection.assembly]::loadwithpartialname("System.Windows.Forms")
             $openFile = New-Object System.Windows.Forms.OpenFileDialog -Property @{
-                Title="Please select ISO image with Windows Server 2016, 2019 or Server Insider"
+                Title="Please select ISO image with Windows Server 2016, 2019, 2022 or Server Insider"
             }
             $openFile.Filter = "iso files (*.iso)|*.iso|All files (*.*)|*.*" 
             If($openFile.ShowDialog() -eq "OK"){
@@ -379,7 +384,21 @@ If (-not $isAdmin) {
             VHDName="Win2019Core_G2.vhdx"
             Size=30GB
         }
-    }elseif ($BuildNumber -ge 17744 -and $SAC){
+    }elseif ($BuildNumber -eq 20348){
+        #Windows Server 2022
+        $ServerVHDs += @{
+            Kind = "Full"
+            Edition="4" 
+            VHDName="Win2022_G2.vhdx"
+            Size=60GB
+        }
+        $ServerVHDs += @{
+            Kind = "Core"
+            Edition="3" 
+            VHDName="Win2022Core_G2.vhdx"
+            Size=30GB
+        }
+    }elseif ($BuildNumber -gt 20348 -and $SAC){
         $ServerVHDs += @{
             Kind = "Core"
             Edition="2" 
@@ -390,7 +409,7 @@ If (-not $isAdmin) {
         if ($LabConfig.DCEdition -gt 2){
             $LabConfig.DCEdition=2
         }
-    }elseif ($BuildNumber -ge 17744){
+    }elseif ($BuildNumber -gt 20348){
         #Windows Sever Insider
         $ServerVHDs += @{
             Kind = "Full"
@@ -590,8 +609,8 @@ If (-not $isAdmin) {
             if ($VMVersion.Build -ge 17763){
                 $oeminformation=@"
                 <OEMInformation>
-                    <SupportProvider>WSLab</SupportProvider>
-                    <SupportURL>https://aka.ms/wslab</SupportURL>
+                    <SupportProvider>MSLab</SupportProvider>
+                    <SupportURL>https://aka.ms/mslab</SupportURL>
                 </OEMInformation>
 "@
             }else{
@@ -1089,9 +1108,16 @@ If (-not $isAdmin) {
 #region finishing
     WriteSuccess "Script finished at $(Get-date) and took $(((get-date) - $StartDateTime).TotalMinutes) Minutes"
 
-    WriteInfoHighlighted "Do you want to cleanup unnecessary files and folders?"
-    WriteInfo "`t (.\Temp\ 1_Prereq.ps1 2_CreateParentDisks.ps1 and rename 3_deploy to just deploy)"
-    If ((Read-host "`t Please type Y or N") -like "*Y"){
+    $options = [System.Management.Automation.Host.ChoiceDescription[]] @(
+        <# 0 #> New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", "Cleanup .\Temp\ 1_Prereq.ps1 2_CreateParentDisks.ps1 and rename 3_deploy.ps1 to just deploy.ps1"
+        <# 1 #> New-Object System.Management.Automation.Host.ChoiceDescription "&No", "Keep files (in case DC was not created sucessfully)"
+    )
+    $response = $host.UI.PromptForChoice("Unnecessary files cleanup","Do you want to cleanup unnecessary files and folders?", $options, 0 <#default option#>)
+
+    If ($response -eq 1){
+        $renamed = $false
+        WriteInfo "Skipping cleanup"
+    }else{
         $renamed = $true
         WriteInfo "`t `t Cleaning unnecessary items"
         Remove-Item -Path "$PSScriptRoot\temp" -Force -Recurse 
@@ -1101,9 +1127,6 @@ If (-not $isAdmin) {
         } 
         WriteInfo "`t `t `t Renaming $PSScriptRoot\3_Deploy.ps1 to Deploy.ps1"
         Rename-Item -Path "$PSScriptRoot\3_Deploy.ps1" -NewName "Deploy.ps1" -ErrorAction SilentlyContinue
-    }else{
-        $renamed = $false
-        WriteInfo "`t You did not type Y, skipping cleanup"
     }
 
     # Telemetry Event

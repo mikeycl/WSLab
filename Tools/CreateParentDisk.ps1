@@ -44,7 +44,7 @@ If (-not $isAdmin) {
     if (!(Test-Path "$PSScriptRoot\Convert-WindowsImage.ps1")){
         WriteInfo "`t Downloading Convert-WindowsImage"
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/microsoft/WSLab/master/Tools/Convert-WindowsImage.ps1" -OutFile "$PSScriptRoot\Convert-WindowsImage.ps1"
+            Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/microsoft/MSLab/master/Tools/Convert-WindowsImage.ps1" -OutFile "$PSScriptRoot\Convert-WindowsImage.ps1"
         } catch {
             WriteErrorAndExit "`t Failed to download Convert-WindowsImage.ps1!"
         }
@@ -153,11 +153,17 @@ If (-not $isAdmin) {
             }
 
             #Generate vhdx name
-            if ($edition -eq "Azure Stack HCI"){
+            if ($edition -like "*Azure Stack HCI*"){
                 $tempvhdname = switch ($BuildNumber){
                     17784 {
                         "AzSHCI20H2_G2.vhdx"
+                    }                    
+                    20348 {
+                        "AzSHCI21H2_G2.vhdx"
                     }
+                }
+                if ($BuildNumber -GT 20348){
+                    $tempvhdname="AzSHCIInsider_$BuildNumber.vhdx"
                 }
             }elseif (($Edition -like "*Server*Core*") -or ($Edition -like "Windows Server * Datacenter") -or ($Edition -like "Windows Server * Standard")){
                 $tempvhdname = switch ($BuildNumber){
@@ -194,8 +200,11 @@ If (-not $isAdmin) {
                     19041 {
                         "WinServer20H1_G2.vhdx"
                     }
+                    20348 {
+                        "Win2022Core_G2.vhdx"
+                    }
                 }
-                if ($BuildNumber -gt 18362){
+                if ($BuildNumber -gt 20348){
                     $tempvhdname="WinSrvInsiderCore_$BuildNumber.vhdx"
                 }
             }elseif($Edition -like "Hyper-V*"){
@@ -233,8 +242,11 @@ If (-not $isAdmin) {
                     17763 {
                         "Win2019_G2.vhdx"
                     }
+                    20348 {
+                        "Win2022_G2.vhdx"
+                    }
                 }
-                if ($BuildNumber -GT 18362){
+                if ($BuildNumber -GT 20348){
                     $tempvhdname="WinSrvInsider_$BuildNumber.vhdx"
                 }
             }else{
@@ -253,7 +265,6 @@ If (-not $isAdmin) {
                     }
                     10240 {
                         "Win10TH1_G2.vhdx"
-
                     }
                     10586 {
                         "Win10TH2_G2.vhdx"
@@ -282,9 +293,12 @@ If (-not $isAdmin) {
                     19041 {
                         "Win1020H1_G2.vhdx"
                     }
+                    22000 {
+                        "Win1121H2_G2.vhdx"
+                    }
                 }
-                if ($BuildNumber -GT 19041){
-                    $tempvhdname="Win10Insider_$BuildNumber.vhdx"
+                if ($BuildNumber -GT 22000){
+                    $tempvhdname="Win11Insider_$BuildNumber.vhdx"
                 }
             }
         }

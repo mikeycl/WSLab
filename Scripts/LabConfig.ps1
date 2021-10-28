@@ -1,28 +1,29 @@
-﻿#basic config for Windows Server 2019, that creates VMs for S2D Hyperconverged scenario https://github.com/Microsoft/WSLab/tree/master/Scenarios/S2D%20Hyperconverged
+﻿#basic config for Windows Server 2019, that creates VMs for S2D Hyperconverged scenario https://github.com/Microsoft/MSLab/tree/master/Scenarios/S2D%20Hyperconverged
 
-$LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!'; Prefix = 'WSLab-' ; DCEdition='4'; Internet=$true ; AdditionalNetworksConfig=@(); VMs=@()}
-# Windows Server 2019
-1..4 | ForEach-Object {$VMNames="S2D"; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'Win2019Core_G2.vhdx'; SSDNumber = 0; SSDSize=800GB ; HDDNumber = 12; HDDSize= 4TB ; MemoryStartupBytes= 512MB }}
-# Or Azure Stack HCI 
+$LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!'; Prefix = 'MSLab-' ; DCEdition='4'; Internet=$true ; AdditionalNetworksConfig=@(); VMs=@()}
+# Windows Server 2022
+1..4 | ForEach-Object {$VMNames="S2D"; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'Win2022Core_G2.vhdx'; SSDNumber = 0; SSDSize=800GB ; HDDNumber = 12; HDDSize= 4TB ; MemoryStartupBytes= 512MB }}
+# Or Azure Stack HCI 20H2
 #1..4 | ForEach-Object {$VMNames="AzSHCI"; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'AzSHCI20H2_G2.vhdx'; SSDNumber = 0; SSDSize=800GB ; HDDNumber = 12; HDDSize= 4TB ; MemoryStartupBytes= 1GB }}
-# Or Windows Server Insider Preview
-#1..4 | ForEach-Object {$VMNames="S2D"; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'WinSrvInsiderCore_20282.vhdx'; SSDNumber = 0; SSDSize=800GB ; HDDNumber = 12; HDDSize= 4TB ; MemoryStartupBytes= 512MB }}
+# Or Windows Server 2019
+#1..4 | ForEach-Object {$VMNames="S2D"; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'Win2019Core_G2.vhdx'; SSDNumber = 0; SSDSize=800GB ; HDDNumber = 12; HDDSize= 4TB ; MemoryStartupBytes= 512MB }}
 
 
 ### HELP ###
 
-#If you need more help or different configuration options, ping me at jaromirk@microsoft.com
+#If you need more help or different configuration options, ping us at jaromir.kaspar@dell.com or vlmach@microsoft.com
 
 #region Same as above, but with more explanation
     <#
     $LabConfig=@{
-        DomainAdminName='LabAdmin';                  # Used during 2_CreateParentDisks (no affect if changed after this step)
-        AdminPassword='LS1setup!';                   # Used during 2_CreateParentDisks. If changed after, it will break the functionality of 3_Deploy.ps1
-        Prefix = 'WSLab-';                           # (Optional) All VMs and vSwitch are created with this prefix, so you can identify the lab. If not specified, Lab folder name is used
-        SwitchName = 'LabSwitch';                    # (Optional) Name of vSwitch
+        DomainAdminName="LabAdmin";                  # Used during 2_CreateParentDisks (no affect if changed after this step)
+        AdminPassword="LS1setup!";                   # Used during 2_CreateParentDisks. If changed after, it will break the functionality of 3_Deploy.ps1
+        Prefix = "MSLab-";                           # (Optional) All VMs and vSwitch are created with this prefix, so you can identify the lab. If not specified, Lab folder name is used
+        SwitchName = "LabSwitch";                    # (Optional) Name of vSwitch
+        SwitchNICs = "NIC1","NIC2";                  # (Optional) Adds these NICs to vSwitch (without connecting hostOS).
         SecureBoot=$true;                            # (Optional) Useful when testing unsigned builds (Useful for MS developers for daily builds)
-        DCEdition='4';                               # 4 for DataCenter or 3 for DataCenterCore
-        InstallSCVMM='No';                           # (Optional) Yes/Prereqs/SQL/ADK/No
+        DCEdition="4";                               # 4 for DataCenter or 3 for DataCenterCore
+        InstallSCVMM="No";                           # (Optional) Yes/Prereqs/SQL/ADK/No
         AdditionalNetworksInDC=$false;               # (Optional) If Additional networks should be added also to DC
         DomainNetbiosName="Corp";                    # (Optional) If set, custom domain NetBios name will be used. if not specified, Default "corp" will be used
         DomainName="Corp.contoso.com";               # (Optional) If set, custom DomainName will be used. If not specified, Default "Corp.contoso.com" will be used
@@ -39,7 +40,7 @@ $LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!'; Prefix = 'W
         DHCPscope="10.0.0.0";                        # (Optional) 10.0.0.0 is configured if nothing is specified. Scope has to end with .0 (like 10.10.10.0). It's always /24       
         DCVMVersion="9.0";                           # (Optional) Latest is used if nothing is specified. Make sure you use values like "8.0","8.3","9.0"
         TelemetryLevel="";                           # (Optional) If configured, script will stop prompting you for telemetry. Values are "None","Basic","Full"
-        TelemetryNickname="";                        # (Optional) If configured, telemetry will be sent with NickName to correlate data to specified NickName. So when leaderboards will be published, WSLab users will be able to see their own stats
+        TelemetryNickname="";                        # (Optional) If configured, telemetry will be sent with NickName to correlate data to specified NickName. So when leaderboards will be published, MSLab users will be able to see their own stats
         AutoStartAfterDeploy=$false;                 # (Optional) If $false, no VM will be started; if $true or 'All' all lab VMs will be started after Deploy script; if 'DeployedOnly' only newly created VMs will be started.
         InternetVLAN="";                             # (Optional) If set, it will apply VLAN on Interent adapter connected to DC
         AdditionalNetworksConfig=@();                # Just empty array for config below
@@ -52,7 +53,7 @@ $LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!'; Prefix = 'W
         $LABConfig.VMs += @{
             VMName = "$VMNames$_" ;
             Configuration = 'S2D' ;                    # Simple/S2D/Shared/Replica
-            ParentVHD = 'Win2016Core_G2.vhdx';         # VHD Name from .\ParentDisks folder
+            ParentVHD = 'Win2022Core_G2.vhdx';         # VHD Name from .\ParentDisks folder
             SSDNumber = 0;                             # Number of "SSDs" (its just simulation of SSD-like sized HDD, just bunch of smaller disks)
             SSDSize=800GB ;                            # Size of "SSDs"
             HDDNumber = 12;                            # Number of "HDDs"
@@ -181,11 +182,11 @@ $LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!'; Prefix = 'W
     TelemetryLevel (optional)
         Example: TelemetryLevel="Full"
         If set, scripts will not prompt for telemetry. Can be "None","Basic","Full"
-        For more info see https://aka.ms/wslab/telemetry
+        For more info see https://aka.ms/mslab/telemetry
         
     TelemetryNickname (optional)
         Example: TelemetryNickname="Jaromirk"
-        If configured, telemetry will be sent with NickName to correlate data to specified NickName. So when leaderboards will be published, WSLab users will be able to see their own stats
+        If configured, telemetry will be sent with NickName to correlate data to specified NickName. So when leaderboards will be published, MSLab users will be able to see their own stats
 
     #>
 #endregion
@@ -278,7 +279,7 @@ $LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!'; Prefix = 'W
     VMProcessorCount (Optional)
         Example VMProcessorCount=8
         Number of Processors in VM. If specified more than available in host, maximum possible number will be used.
-        If "Max" is specified, maximum number of VCPUs will be used (determined from host where wslab is running)
+        If "Max" is specified, maximum number of VCPUs will be used (determined from host where mslab is running)
 
     Generation (Optional)
         Example Generation=1

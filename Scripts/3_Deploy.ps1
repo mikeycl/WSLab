@@ -32,10 +32,10 @@ If (-not $isAdmin) {
             $RunSynchronous
         )
 
-        if ( Test-Path "Unattend.xml" ) {
-        Remove-Item .\Unattend.xml
+        if ( Test-Path "$PSScriptRoot\Temp\unattend.xml" ) {
+            Remove-Item "$PSScriptRoot\Temp\unattend.xml"
         }
-        $unattendFile = New-Item "Unattend.xml" -type File
+        $unattendFile = New-Item "$PSScriptRoot\Temp\unattend.xml" -type File
         $fileContent = @"
 <?xml version='1.0' encoding='utf-8'?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -105,10 +105,10 @@ If (-not $isAdmin) {
             $AdditionalAccount
         )
 
-            if ( Test-Path "Unattend.xml" ) {
-            Remove-Item .\Unattend.xml
+            if ( Test-Path "$PSScriptRoot\Temp\unattend.xml" ) {
+                Remove-Item "$PSScriptRoot\Temp\unattend.xml"
             }
-            $unattendFile = New-Item "Unattend.xml" -type File
+            $unattendFile = New-Item "$PSScriptRoot\Temp\unattend.xml" -type File
             $fileContent = @"
 <?xml version='1.0' encoding='utf-8'?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -170,10 +170,10 @@ If (-not $isAdmin) {
             [string]
             $DomainName
         )
-        if ( Test-Path "Unattend.xml" ) {
-            Remove-Item .\Unattend.xml
+        if ( Test-Path "$PSScriptRoot\Temp\unattend.xml" ) {
+            Remove-Item "$PSScriptRoot\Temp\unattend.xml"
         }
-        $unattendFile = New-Item "Unattend.xml" -type File
+        $unattendFile = New-Item "$PSScriptRoot\Temp\unattend.xml" -type File
         $fileContent = @"
 <?xml version='1.0' encoding='utf-8'?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -589,8 +589,8 @@ If (-not $isAdmin) {
         if ($VMVersion.Build -ge 17763){
             $oeminformation=@"
             <OEMInformation>
-             <SupportProvider>WSLab</SupportProvider>
-             <SupportURL>https://aka.ms/wslab</SupportURL>
+             <SupportProvider>MSLab</SupportProvider>
+             <SupportURL>https://aka.ms/mslab</SupportURL>
            </OEMInformation>
 "@
         }else{
@@ -674,7 +674,7 @@ If (-not $isAdmin) {
 
     $StartDateTime = Get-Date
     WriteInfoHighlighted "Script started at $StartDateTime"
-    WriteInfo "`nWSLab Version $wslabVersion"
+    WriteInfo "`nMSLab Version $mslabVersion"
 
 
     ##Load LabConfig....
@@ -762,6 +762,11 @@ If (-not $isAdmin) {
 #endregion
 
 #region Some Additional checks and prereqs configuration
+
+    # Checking if not running in root folder
+    if (($PSScriptRoot).Length -eq 3) {
+        WriteErrorAndExit "`t MSLab canot run in root folder. Please put MSLab scripts into a folder. Exiting"
+    }
 
     # Checking for Compatible OS
         WriteInfoHighlighted "Checking if OS is Windows 10 1511 (10586)/Server 2016 or newer"
@@ -867,8 +872,8 @@ If (-not $isAdmin) {
     WriteInfoHighlighted "Checking if volume filesystem is NTFS or ReFS"
     $driveletter=$PSScriptRoot -split ":" | Select-Object -First 1
     if ($PSScriptRoot -like "c:\ClusterStorage*"){
-        WriteSuccess "`t Volume Cluster Shared Volume. Mountdir will be $env:Temp\WSLAbMountdir" 
-        $mountdir="$env:Temp\WSLAbMountDir"
+        WriteSuccess "`t Volume Cluster Shared Volume. Mountdir will be $env:Temp\MSLabMountdir" 
+        $mountdir="$env:Temp\MSLabMountDir"
         $VolumeFileSystem="CSVFS"
     }else{
         $mountdir="$PSScriptRoot\Temp\MountDir"
@@ -892,9 +897,26 @@ If (-not $isAdmin) {
         WriteInfoHighlighted "Creating Switch"
         WriteInfo "`t Checking if $SwitchName already exists..."
 
-        if ((Get-VMSwitch -Name $SwitchName -ErrorAction Ignore) -eq $Null){ 
+        if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction Ignore)){ 
             WriteInfo "`t Creating $SwitchName..."
-            New-VMSwitch -SwitchType Private -Name $SwitchName
+            if ($LabConfig.SwitchNICs){
+                #test if NICs are not already connected to another switch
+                $VMSComponentStatus=Get-NetAdapterBinding -Name $LabConfig.SwitchNICs -ComponentID vms_pp
+                if (($VMSComponentStatus).Enabled -contains $true){
+                    $BoundNICs=$VMSComponentStatus | Where-Object Enabled -eq $true
+                    $InterfaceGUIDs=(Get-NetAdapter -Name $BoundNICs.Name).InterfaceGUID
+                    $vSwitches=ForEach ($InterfaceGUID in $InterfaceGUIDs){Get-VMSwitch | Where-Object NetAdapterInterfaceGuid -Contains $InterfaceGuid}
+                    WriteError "Following NICs are already bound to a Virtual Switch:"
+                    $BoundNICs
+                    WriteError "Virtual Switch list:"
+                    $vSwitches | Select-Object Name,NetAdapterInterfaceDescriptions
+                    WriteErrorAndExit "At least one NIC is connected to existing Virtual Switch, different than specified in Labconfig ($SwitchName)"
+                }else{
+                    New-VMSwitch -Name $SwitchName -EnableEmbeddedTeaming $true -EnableIov $true -NetAdapterName $LabConfig.SwitchNics -AllowManagementOS $False
+                }
+            }else{
+                New-VMSwitch -SwitchType Private -Name $SwitchName
+            }
         }else{
             $SwitchNameExists=$True
             WriteInfo "`t $SwitchName exists. Looks like lab with same prefix exists. "
@@ -936,7 +958,7 @@ If (-not $isAdmin) {
                     WriteSuccess "`t External vSwitch  $ExternalSwitchName detected"
                 }else{
                     WriteInfo "`t Detecting external VMSwitch"
-                    $ExtSwitch=Get-VMSwitch -SwitchType External
+                    $ExtSwitch=Get-VMSwitch -SwitchType External | Where-Object Name -NotLike $SwitchName
                     if (!$ExtSwitch){
                         WriteInfoHighlighted "`t No External Switch detected. Will create one "
                         $TempNetAdapters=get-netadapter | Where-Object Name -NotLike vEthernet* | Where-Object status -eq up
@@ -1035,7 +1057,7 @@ If (-not $isAdmin) {
                 # If the VM ID is already used create a copy of the DC VM configuration instead of in-place registration
                 $vm = Get-VM -Id $_.BaseName -ErrorAction SilentlyContinue
                 if($vm -and $dcCandidates.Length -eq 1) { # allow duplicating of the DC VM only if it is the only one VM in lab folder (as if more than one exists, probably just labprefix was changed after the deployment)
-                    WriteWarning "You are trying to deploy a previously deployed lab from a different location as there is another DC VM with a same VM ID (is this a copied lab folder?) -> this DC VM will be registered with new VM ID."
+                    WriteInfoHighlighted "You are trying to deploy a previously deployed lab from a different location as there is another DC VM with a same VM ID (is this a copied lab folder?) -> this DC VM will be registered with new VM ID."
                     $directory = $_.Directory.FullName.replace("\Virtual Machines", "")
                     $DC = Import-VM -Path $_.FullName -GenerateNewId -Copy -VirtualMachinePath $directory -VhdDestinationPath "$directory\Virtual Hard Disks"
                     WriteInfo "`t`t Virtual Machine $($DC.Name) registered with a new VM ID $($DC.Id)"
@@ -1513,11 +1535,8 @@ If (-not $isAdmin) {
 
     #a bit cleanup
         Remove-Item -Path "$PSScriptRoot\temp" -Force -Recurse
-        if (Test-Path "$PSScriptRoot\unattend.xml") {
-            remove-item "$PSScriptRoot\unattend.xml"
-        }
 
-    #set MacSpoofing and AllowTeaming (for SET switch in VMs to work properly with vNICs)
+        #set MacSpoofing and AllowTeaming (for SET switch in VMs to work properly with vNICs)
         WriteInfo "`t Setting MacSpoofing On and AllowTeaming On"
         Set-VMNetworkAdapter -VMName "$($labconfig.Prefix)*" -MacAddressSpoofing On -AllowTeaming On
 
@@ -1532,7 +1551,12 @@ If (-not $isAdmin) {
     #Enable Guest services on all VMs if integration component if configured
     if ($labconfig.EnableGuestServiceInterface){
         WriteInfo "`t Enabling Guest Service Interface"
-        Get-VM -VMName "$($labconfig.Prefix)*" | Where-Object {$_.state -eq "Running" -or $_.state -eq "Off"} | Enable-VMIntegrationService -Name "Guest Service Interface"
+        $vms = Get-VM -VMName "$($labconfig.Prefix)*" | Where-Object {$_.state -eq "Running" -or $_.state -eq "Off"} 
+        foreach ($vm in $vms) {
+            $guestServiceId = 'Microsoft:{0}\6C09BB55-D683-4DA0-8931-C9BF705F6480' -f $vm.Id
+            $guestService = $vm | Get-VMIntegrationService | Where-Object -FilterScript {$_.Id -eq $guestServiceId}
+            $guestService | Enable-VMIntegrationService
+        }
         $TempVMs=Get-VM -VMName "$($labconfig.Prefix)*" | Where-Object {$_.state -ne "Running" -and $_.state -ne "Off"}
         if ($TempVMs){
             WriteInfoHighlighted "`t`t Following VMs cannot be configured, as the state is not running or off"
@@ -1551,7 +1575,9 @@ If (-not $isAdmin) {
         } elseif($LabConfig.AutoStartAfterDeploy -eq "DeployedOnly") {
             $startVMs = 2
         }
-        
+
+        $CheckPointTime=Get-Date
+
         if(-not $LabConfig.ContainsKey("AutoStartAfterDeploy") -and $AllVMs.Count -gt 0) {
             $options = [System.Management.Automation.Host.ChoiceDescription[]] @(
                 <# 0 #> New-Object System.Management.Automation.Host.ChoiceDescription "&No", "No VM will be started."
@@ -1586,7 +1612,7 @@ If (-not $isAdmin) {
     if((Get-TelemetryLevel) -in $TelemetryEnabledLevels) {
         WriteInfo "Sending telemetry info"
         $metrics = @{
-            'script.duration' = [Math]::Round(((Get-Date) - $StartDateTime).TotalSeconds, 2)
+            'script.duration' = [Math]::Round(($CheckPointTime - $StartDateTime).TotalSeconds, 2)
             'lab.vmsCount.active' = ($AllVMs | Measure-Object).Count # how many VMs are running
             'lab.vmsCount.provisioned' = ($provisionedVMs | Measure-Object).Count # how many VMs were created by this script run
         }
@@ -1602,7 +1628,7 @@ If (-not $isAdmin) {
     }
 
     #write how much it took to deploy
-        WriteInfo "Script finished at $(Get-Date) and took $(((Get-Date) - $StartDateTime).TotalMinutes) Minutes"
+        WriteInfo "Script finished at $CheckPointTime and took $(($CheckPointTime - $StartDateTime).TotalMinutes) Minutes"
 
     Stop-Transcript
 

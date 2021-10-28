@@ -2,6 +2,8 @@
 
 ## About the lab
 
+Note: I updated scenario.ps1 several times, so readme.md might be bit outdated (JaromirK)
+
 In following lab you will deploy Azure Kubernetes Service into Azure Stack HCI cluster. There are currently two options. From PowerShell and from Windows Admin Center. Windows Admin Center can be installed on Windows 10 or on Windows Server in Gateway mode.
 
 Note: there is a known issue, that deploying Azure Kubernetes Server from Windows Admin Center in Gateway mode does not work (importing extension succeeds, but then it is not able to display it).
@@ -22,7 +24,7 @@ Note: please download latest [WSLab](https://aka.ms/wslab/download) as there is 
 $LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!' ; <#Prefix = 'WSLab-'#> ; DCEdition='4'; Internet=$true ; TelemetryLevel='Full' ; TelemetryNickname='' ; AdditionalNetworksConfig=@(); VMs=@()}
 
 #2 nodes for AzSHCI Cluster
-1..2 | ForEach-Object {$VMNames="AzSHCI" ; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'AzSHCI20H2_G2.vhdx' ; HDDNumber = 4 ; HDDSize= 4TB ; MemoryStartupBytes= 16GB; VMProcessorCount="Max" ; NestedVirt=$true}}
+1..2 | ForEach-Object {$VMNames="AzSHCI" ; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'AzSHCI20H2_G2.vhdx' ; HDDNumber = 4 ; HDDSize= 4TB ; MemoryStartupBytes= 24GB; VMProcessorCount="Max" ; NestedVirt=$true}}
 
 #Windows 10 management machine (for Windows Admin Center)
 $LabConfig.VMs += @{ VMName = 'Win10'; ParentVHD = 'Win1020H1_G2.vhdx' ; AddToolsVHD = $True ; MGMTNICs=1 }

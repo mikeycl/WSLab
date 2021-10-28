@@ -26,15 +26,14 @@ function  Get-WindowsBuildNumber {
 
 #region Initialization
 
-
 # grab Time and start Transcript
-    Start-Transcript -Path "$ScriptRoot\Prereq.log"
+    Start-Transcript -Path "$PSScriptRoot\Prereq.log"
     $StartDateTime = Get-Date
     WriteInfo "Script started at $StartDateTime"
-    WriteInfo "`nWSLab Version $wslabVersion"
+    WriteInfo "`nMSLab Version $mslabVersion"
 
 #Load LabConfig....
-    . "$ScriptRoot\LabConfig.ps1"
+    . "$PSScriptRoot\LabConfig.ps1"
 
 # Telemetry Event
     if((Get-TelemetryLevel) -in $TelemetryEnabledLevels) {
@@ -57,6 +56,12 @@ function  Get-WindowsBuildNumber {
 #endregion
 
 #region OS checks and folder build
+
+# Check if not running in root folder
+    if (($psscriptroot).Length -eq 3) {
+        WriteErrorAndExit "`t MSLab canot run in root folder. Please put MSLab scripts into a folder. Exiting"
+    }
+
 # Checking for Compatible OS
     WriteInfoHighlighted "Checking if OS is Windows 10 1511 (10586)/Server 2016 or newer"
 
@@ -68,7 +73,7 @@ function  Get-WindowsBuildNumber {
     }
 
 # Checking Folder Structure
-    "ParentDisks","Temp","Temp\DSC","Temp\ToolsVHD\DiskSpd","Temp\ToolsVHD\SCVMM\ADK","Temp\ToolsVHD\SCVMM\ADKWinPE","Temp\ToolsVHD\SCVMM\SQL","Temp\ToolsVHD\SCVMM\SCVMM","Temp\ToolsVHD\SCVMM\UpdateRollup","Temp\ToolsVHD\VMFleet" | ForEach-Object {
+    "ParentDisks","Temp","Temp\DSC","Temp\ToolsVHD\DiskSpd","Temp\ToolsVHD\SCVMM\ADK","Temp\ToolsVHD\SCVMM\ADKWinPE","Temp\ToolsVHD\SCVMM\SQL","Temp\ToolsVHD\SCVMM\SCVMM","Temp\ToolsVHD\SCVMM\UpdateRollup" | ForEach-Object {
         if (!( Test-Path "$PSScriptRoot\$_" )) { New-Item -Type Directory -Path "$PSScriptRoot\$_" } }
 
     "Temp\ToolsVHD\SCVMM\ADK\Copy_ADK_with_adksetup.exe_here.txt","Temp\ToolsVHD\SCVMM\ADKWinPE\Copy_ADKWinPE_with_adkwinpesetup.exe_here.txt","Temp\ToolsVHD\SCVMM\SQL\Copy_SQL2017_or_SQL2019_with_setup.exe_here.txt","Temp\ToolsVHD\SCVMM\SCVMM\Copy_SCVMM_with_setup.exe_here.txt","Temp\ToolsVHD\SCVMM\UpdateRollup\Copy_SCVMM_Update_Rollup_MSPs_here.txt" | ForEach-Object {
@@ -85,7 +90,7 @@ function  Get-WindowsBuildNumber {
             WriteSuccess "`t $Filename is present, skipping download"
         }else{
             $FileContent=$null
-            $FileContent = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Microsoft/WSLab/master/Tools/$Filename.ps1").Content
+            $FileContent = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Microsoft/MSLab/master/Tools/$Filename.ps1").Content
             if ($FileContent){
                 $script = New-Item $Path -type File -Force
                 $FileContent=$FileContent -replace "PasswordGoesHere",$LabConfig.AdminPassword #only applies to 1_SQL_Install and 3_SCVMM_Install.ps1
@@ -97,33 +102,15 @@ function  Get-WindowsBuildNumber {
         }
     }
 
-#Download SetupVMFleet script
-    $Filename="SetupVMFleet"
-    $Path="$PSScriptRoot\Temp\ToolsVHD\$FileName.ps1"
-    If (Test-Path -Path $Path){
-        WriteSuccess "`t $Filename is present, skipping download"
-    }else{
-        $FileContent = $null
-        $FileContent = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Microsoft/WSLab/master/Tools/$Filename.ps1").Content
-        if ($FileContent){
-            $script = New-Item $Path -type File -Force
-            $FileContent=$FileContent -replace "PasswordGoesHere",$LabConfig.AdminPassword
-            $FileContent=$FileContent -replace "DomainNameGoesHere",$LabConfig.DomainNetbiosName
-            Set-Content -path $script -value $FileContent
-        }else{
-            WriteErrorAndExit "Unable to download $Filename."
-        }
-    }
-
-# add createparentdisks and DownloadLatestCU scripts to Parent Disks folder
-    $FileNames="CreateParentDisk","DownloadLatestCUs"
+# add createparentdisks, DownloadLatestCU and PatchParentDisks scripts to Parent Disks folder
+    $FileNames="CreateParentDisk","DownloadLatestCUs","PatchParentDisks","CreateVMFleetDisk"
     foreach ($filename in $filenames){
         $Path="$PSScriptRoot\ParentDisks\$FileName.ps1"
         If (Test-Path -Path $Path){
             WriteSuccess "`t $Filename is present, skipping download"
         }else{
             $FileContent = $null
-            $FileContent = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Microsoft/WSLab/master/Tools/$FileName.ps1").Content
+            $FileContent = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/Microsoft/MSLab/master/Tools/$FileName.ps1").Content
             if ($FileContent){
                 $script = New-Item "$PSScriptRoot\ParentDisks\$FileName.ps1" -type File -Force
                 Set-Content -path $script -value $FileContent
@@ -140,7 +127,7 @@ If ( Test-Path -Path "$PSScriptRoot\Temp\Convert-WindowsImage.ps1" ) {
 }else{ 
     WriteInfo "`t Downloading Convert-WindowsImage"
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/microsoft/WSLab/master/Tools/Convert-WindowsImage.ps1" -OutFile "$PSScriptRoot\Temp\Convert-WindowsImage.ps1"
+        Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/microsoft/MSLab/master/Tools/Convert-WindowsImage.ps1" -OutFile "$PSScriptRoot\Temp\Convert-WindowsImage.ps1"
     } catch {
         WriteError "`t Failed to download Convert-WindowsImage.ps1!"
     }
@@ -164,7 +151,7 @@ If ( Test-Path -Path "$PSScriptRoot\Temp\Convert-WindowsImage.ps1" ) {
                 $downloadurl = $webcontent.BaseResponse.ResponseUri.AbsoluteUri.Substring(0,$webcontent.BaseResponse.ResponseUri.AbsoluteUri.LastIndexOf('/'))+($webcontent.Links | where-object { $_.'data-url' -match '/Diskspd.*zip$' }|Select-Object -ExpandProperty "data-url")
             }
             #>
-            $downloadurl="https://github.com/microsoft/diskspd/releases/download/v2.0.21a/DiskSpd-2.0.21a.zip"
+            $downloadurl="https://github.com/microsoft/diskspd/releases/download/v2.0.21a/DiskSpd.zip"
             Invoke-WebRequest -Uri $downloadurl -OutFile "$PSScriptRoot\Temp\ToolsVHD\DiskSpd\diskspd.zip"
         }catch{
             WriteError "`t Failed to download Diskspd!"
@@ -176,24 +163,6 @@ If ( Test-Path -Path "$PSScriptRoot\Temp\Convert-WindowsImage.ps1" ) {
             Remove-Item -Path "$PSScriptRoot\Temp\ToolsVHD\DiskSpd\Unzip" -Recurse -Force
     }
 
-#Download VMFleet
-    WriteInfoHighlighted "Testing VMFleet presence"
-    If ( Test-Path -Path "$PSScriptRoot\Temp\ToolsVHD\VMFleet\install-vmfleet.ps1" ) {
-        WriteSuccess "`t VMFleet is present, skipping download"
-    }else{ 
-        WriteInfo "`t VMFleet not there - Downloading VMFleet"
-        try {
-            $downloadurl = "https://github.com/Microsoft/diskspd/archive/master.zip"
-            Invoke-WebRequest -Uri $downloadurl -OutFile "$PSScriptRoot\Temp\ToolsVHD\VMFleet\VMFleet.zip"
-        }catch{
-            WriteError "`t Failed to download VMFleet!"
-        }
-        # Unnzipping and extracting just VMFleet
-            Microsoft.PowerShell.Archive\Expand-Archive "$PSScriptRoot\Temp\ToolsVHD\VMFleet\VMFleet.zip" -DestinationPath "$PSScriptRoot\Temp\ToolsVHD\VMFleet\Unzip"
-            Copy-Item -Path "$PSScriptRoot\Temp\ToolsVHD\VMFleet\Unzip\diskspd-master\Frameworks\VMFleet\*" -Destination "$PSScriptRoot\Temp\ToolsVHD\VMFleet\"
-            Remove-Item -Path "$PSScriptRoot\Temp\ToolsVHD\VMFleet\VMFleet.zip"
-            Remove-Item -Path "$PSScriptRoot\Temp\ToolsVHD\VMFleet\Unzip" -Recurse -Force
-    }
 #endregion
 
 #region Downloading required Posh Modules

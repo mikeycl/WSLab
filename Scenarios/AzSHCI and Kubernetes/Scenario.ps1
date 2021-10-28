@@ -1,9 +1,13 @@
+<# 
+Not needed anymore. Keeping it if someone wants to recycle
+
 #############################
 ### Run from Hyper-V Host ###
 #############################
 
 #run from Host to expand C: drives in VMs to 120GB. This is required as Install-AKSHCI checks free space on C (should check free space in CSV)
-$VMs=Get-VM -VMName WSLab*azshci*
+#script grabs all VMs starting with "MSLab" (and containing azshci), so modify line below accordingly
+$VMs=Get-VM -VMName MSLab*azshci*
 $VMs | Get-VMHardDiskDrive -ControllerLocation 0 | Resize-VHD -SizeBytes 120GB
 #VM Credentials
 $secpasswd = ConvertTo-SecureString "LS1setup!" -AsPlainText -Force
@@ -15,12 +19,20 @@ Foreach ($VM in $VMs){
         $part | Resize-Partition -Size $sizemax
     }
 }
+#>
+
 
 ###################
 ### Run from DC ###
 ###################
 
-#region Create 2 node cluster (just simple. Not for prod - follow hyperconverged scenario for real clusters https://github.com/microsoft/WSLab/tree/master/Scenarios/S2D%20Hyperconverged)
+#region Create 2 node cluster (just simple. Not for prod - follow hyperconverged scenario for real clusters https://github.com/microsoft/MSLab/tree/master/Scenarios/S2D%20Hyperconverged)
+
+# Set DHCP Server lease time to 90 days for reserving IP dynamicly allocated to AKS management/working cluster control plane & working nodes.
+Invoke-Command -ComputerName DC -ScriptBlock {
+    Set-DhcpServerv4Scope -ScopeId 10.0.0.0 -LeaseDuration 90.00:00:00
+}
+
 # LabConfig
 $Servers="AzsHCI1","AzSHCI2"
 $ClusterName="AzSHCI-Cluster"
@@ -28,7 +40,7 @@ $ClusterName="AzSHCI-Cluster"
 # Install features for management on server
 Install-WindowsFeature -Name RSAT-Clustering,RSAT-Clustering-Mgmt,RSAT-Clustering-PowerShell,RSAT-Hyper-V-Tools
 
-# Update servers
+# Update servers (does not work on Windows Server 2022 and 21H2 azure stack as WindowsUpdate namespace no longer exists)
 Invoke-Command -ComputerName $servers -ScriptBlock {
     #Grab updates
     $SearchCriteria = "IsInstalled=0"
@@ -108,7 +120,7 @@ Clear-DNSClientCache
 Enable-ClusterS2D -CimSession $ClusterName -Verbose -Confirm:0
 #endregion
 
-#region Register Azure Stack HCI to Azure
+#region Register Azure Stack HCI to Azure - if not registered, VMs are not added as cluster resources = AKS script will fail
 $ClusterName="AzSHCI-Cluster"
 
 #download Azure module
@@ -141,10 +153,10 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMa
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\EscDomains\msftauth.net\aadcdn" /v https /t REG_DWORD /d 2
 Connect-AzAccount
 #>
-#select context if more available
-$context=Get-AzContext -ListAvailable
-if (($context).count -gt 1){
-    $context | Out-GridView -OutputMode Single | Set-AzContext
+#select subscription if more available
+$subscription=Get-AzSubscription
+if (($subscription).count -gt 1){
+    $subscription | Out-GridView -OutputMode Single | Set-AzContext
 }
 
 #grab subscription ID
@@ -194,34 +206,54 @@ Invoke-Command -ComputerName $ClusterName -ScriptBlock {
 }
 #endregion
 
-#region Download AKS HCI module
-Start-BitsTransfer -Source "https://aka.ms/aks-hci-download" -Destination "$env:USERPROFILE\Downloads\AKS-HCI-Public-Preview-Dec-2020.zip"
-#unzip
-Expand-Archive -Path "$env:USERPROFILE\Downloads\AKS-HCI-Public-Preview-Dec-2020.zip" -DestinationPath "$env:USERPROFILE\Downloads" -Force
-Expand-Archive -Path "$env:USERPROFILE\Downloads\AksHci.Powershell.zip" -DestinationPath "$env:USERPROFILE\Downloads\AksHci.Powershell" -Force
+#region Install required modules for AKSHCI https://docs.microsoft.com/en-us/azure-stack/aks-hci/kubernetes-walkthrough-powershell
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+Install-Module -Name PowershellGet -Force -Confirm:$false -SkipPublisherCheck
+Update-Module -Name PowerShellGet
+#Install-Module -Name Az.Accounts -Repository PSGallery -RequiredVersion 2.2.4 -Force
+#Install-Module -Name Az.Resources -Repository PSGallery -RequiredVersion 3.2.0 -Force
+#Install-Module -Name AzureAD -Repository PSGallery -RequiredVersion 2.0.2.128 -Force
+#to be able to install AKSHCI, powershellget 2.2.5 needs to be used - to this posh restart is needed
+Start-Process -Wait -FilePath PowerShell -ArgumentList {
+    Install-Module -Name AksHci -Repository PSGallery -Force -AcceptLicense
+}
+#add required modules (parsing required modules from kva.psd - it also requires certain version of modules)
+#JaromirK note: it would be great if this dependency was downloaded automagically or if you would be ok with latest version (or some minimumversion)
+$item=Get-ChildItem -Path "C:\Program Files\WindowsPowerShell\Modules\Kva" -Recurse | Where-Object name -eq kva.psd1
+$RequiredModules=(Import-LocalizedData -BaseDirectory $item.Directory -FileName $item.Name).RequiredModules
+foreach ($RequiredModule in $RequiredModules){
+    if (!(Get-InstalledModule -Name $RequiredModule.ModuleName -RequiredVersion $RequiredModule.RequiredVersion -ErrorAction Ignore)){
+        Install-Module -Name $RequiredModule.ModuleName -RequiredVersion $RequiredModule.RequiredVersion -Force
+    }
+}
 
+#distribute modules to cluster nodes
+$ClusterName="AzSHCI-Cluster"
+$Servers=(Get-ClusterNode -Cluster $Clustername).Name
+$ModuleNames="AksHci","Moc","Kva","TraceProvider"
+$PSSessions=New-PSSession -ComputerName $Servers
+Foreach ($PSSession in $PSSessions){
+    Foreach ($ModuleName in $ModuleNames){
+        Copy-Item -Path $env:ProgramFiles\windowspowershell\modules\$ModuleName -Destination $env:ProgramFiles\windowspowershell\modules -ToSession $PSSession -Recurse -Force
+    }
+    Foreach ($ModuleName in $RequiredModules.ModuleName){
+        Copy-Item -Path $env:ProgramFiles\windowspowershell\modules\$ModuleName -Destination $env:ProgramFiles\windowspowershell\modules -ToSession $PSSession -Recurse -Force
+    }
+}
 #endregion
 
 #region setup AKS (PowerShell)
-    #Copy PowerShell module to nodes
+    #set variables
     $ClusterName="AzSHCI-Cluster"
     $vSwitchName="vSwitch"
+    $vNetName="aksvnet"
     $VolumeName="AKS"
     $Servers=(Get-ClusterNode -Cluster $ClusterName).Name
+    $VIPPoolStart="10.0.0.100"
+    $VIPPoolEnd="10.0.0.200"
+    $resourcegroupname="$ClusterName-rg"
 
-    #Copy module to nodes
-    $PSSessions=New-PSSession -ComputerName $Servers
-    foreach ($PSSession in $PSSessions){
-        $Folders=Get-ChildItem -Path $env:USERPROFILE\Downloads\AksHci.Powershell\ 
-        foreach ($Folder in $Folders){
-            Copy-Item -Path $folder.FullName -Destination $env:ProgramFiles\windowspowershell\modules -ToSession $PSSession -Recurse -Force
-        }
-    }
-
-    #why this does not work? Why I need to login ot server to run initialize AKSHCINode???
-    <#Invoke-Command -ComputerName $servers -ScriptBlock {
-        Initialize-AksHciNode
-    }#>
+    #JaromirK note: it would be great if I could simply run "Initialize-AksHciNode -ComputerName $ClusterName". I could simply skip credssp. Same applies for AksHciConfig and AksHciRegistration
 
     #Enable CredSSP
     # Temporarily enable CredSSP delegation to avoid double-hop issue
@@ -245,7 +277,9 @@ Expand-Archive -Path "$env:USERPROFILE\Downloads\AksHci.Powershell.zip" -Destina
     }
     #configure aks
     Invoke-Command -ComputerName $servers[0] -Credential $Credentials -Authentication Credssp -ScriptBlock {
-        Set-AksHciConfig -vnetName $using:vSwitchName -workingDir c:\clusterstorage\$using:VolumeName\Images -imageDir c:\clusterstorage\$using:VolumeName\Images -cloudConfigLocation c:\clusterstorage\$using:VolumeName\Config -ClusterRoleName "$($using:ClusterName)_AKS"
+        $vnet = New-AksHciNetworkSetting -Name $using:vNetName -vSwitchName $using:vSwitchName -vippoolstart $using:vippoolstart -vippoolend $using:vippoolend
+        #Set-AksHciConfig -vnet $vnet -workingDir c:\clusterstorage\$using:VolumeName\Images -imageDir c:\clusterstorage\$using:VolumeName\Images -cloudConfigLocation c:\clusterstorage\$using:VolumeName\Config -ClusterRoleName "$($using:ClusterName)_AKS" -controlPlaneVmSize 'default' # Get-AksHciVmSize
+        Set-AksHciConfig -vnet $vnet -imageDir c:\clusterstorage\$using:VolumeName\Images -cloudConfigLocation c:\clusterstorage\$using:VolumeName\Config -ClusterRoleName "$($using:ClusterName)_AKS" -controlPlaneVmSize 'default' # Get-AksHciVmSize
     }
 
     #validate config
@@ -253,11 +287,61 @@ Expand-Archive -Path "$env:USERPROFILE\Downloads\AksHci.Powershell.zip" -Destina
         Get-AksHciConfig
     }
 
-    #note: this step might need to run twice. As for first time it times out on https://github.com/Azure/aks-hci/issues/28 . Before second attempt, unistall-akshci first and set config again
+    #register in Azure
+    if (-not (Get-AzContext)){
+        Connect-AzAccount -UseDeviceAuthentication
+    }
+    $subscription=Get-AzSubscription
+    if (($subscription).count -gt 1){
+        $subscription | Out-GridView -OutputMode Single | Set-AzContext
+    }
+    $subscriptionID=(Get-AzContext).Subscription.id
+
+    #make sure Kubernetes resource providers are registered
+    if (!(Get-InstalledModule -Name Az.Resources -ErrorAction Ignore)){
+        Install-Module -Name Az.Resources -Force
+    }
+    Register-AzResourceProvider -ProviderNamespace Microsoft.Kubernetes
+    Register-AzResourceProvider -ProviderNamespace Microsoft.KubernetesConfiguration
+
+    #wait until resource providers are registered
+    $Providers="Microsoft.Kubernetes","Microsoft.KubernetesConfiguration"
+    foreach ($Provider in $Providers){
+        do {
+            $Status=Get-AzResourceProvider -ProviderNamespace $Provider
+            Write-Output "Registration Status - $Provider : $(($status.RegistrationState -match 'Registered').Count)/$($Status.Count)"
+            Start-Sleep 1
+        } while (($status.RegistrationState -match "Registered").Count -ne ($Status.Count))
+    }
+
+    #Register AZSHCi without prompting for creds
+    $armTokenItemResource = "https://management.core.windows.net/"
+    $graphTokenItemResource = "https://graph.windows.net/"
+    $azContext = Get-AzContext
+    $authFactory = [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.AuthenticationFactory
+    $graphToken = $authFactory.Authenticate($azContext.Account, $azContext.Environment, $azContext.Tenant.Id, $null, [Microsoft.Azure.Commands.Common.Authentication.ShowDialog]::Never, $null, $graphTokenItemResource).AccessToken
+    $armToken = $authFactory.Authenticate($azContext.Account, $azContext.Environment, $azContext.Tenant.Id, $null, [Microsoft.Azure.Commands.Common.Authentication.ShowDialog]::Never, $null, $armTokenItemResource).AccessToken
+    $id = $azContext.Account.Id
+
+    Invoke-Command -computername $servers[0] -ScriptBlock {
+        Set-AksHciRegistration -SubscriptionID $using:subscriptionID -GraphAccessToken $using:graphToken -ArmAccessToken $using:armToken -AccountId $using:id -ResourceGroupName $using:resourcegroupname
+    }
+
+    #or with Device Authentication
+    <#
+    Invoke-Command -computername $servers[0] -ScriptBlock {
+        Set-AksHciRegistration -SubscriptionID $using:subscriptionID -ResourceGroupName $using:resourcegroupname -UseDeviceAuthentication
+    }
+    #>
+
+    #validate registration
+    Invoke-Command -computername $servers[0] -ScriptBlock {
+        Get-AksHciRegistration
+    }    
+
+    #Install
     Invoke-Command -ComputerName $servers[0] -Credential $Credentials -Authentication Credssp -ScriptBlock {
-        #Uninstall-AksHCI
-        #Set-AksHciConfig -vnetName $using:vSwitchName -workingDir c:\clusterstorage\$using:VolumeName\Images -imageDir c:\clusterstorage\$using:VolumeName\Images -cloudConfigLocation c:\clusterstorage\$using:VolumeName\Config -ClusterRoleName "$($using:ClusterName)_AKS"
-        Install-AksHci
+        Install-AksHci -Verbose
     }
 
     # Disable CredSSP
@@ -266,46 +350,48 @@ Expand-Archive -Path "$env:USERPROFILE\Downloads\AksHci.Powershell.zip" -Destina
 #endregion
 
 #region create AKS HCI cluster
+#Jaromirk note: it would be great if I could specify HCI Cluster (like New-AksHciCluster -ComputerName)
 $ClusterName="AzSHCI-Cluster"
 $ClusterNode=(Get-ClusterNode -Cluster $clustername).Name | Select-Object -First 1
 Invoke-Command -ComputerName $ClusterNode -ScriptBlock {
-    New-AksHciCluster -clusterName demo -linuxNodeCount 1 -linuxNodeVmSize Standard_A2_v2 -controlplaneVmSize Standard_A2_v2 -loadBalancerVmSize Standard_A2_v2 #smallest possible VMs
+    New-AksHciCluster -Name demo -linuxNodeCount 1 -linuxNodeVmSize Standard_A2_v2 -controlplaneVmSize Standard_A2_v2 -EnableADAuth -loadBalancerVmSize Standard_A2_v2 #smallest possible VMs
 }
 
 #distribute kubeconfig to other nodes (just to make it symmetric)
+#Jaromirk note: I think this would be useful to do with new-akshcicluster
 $ClusterNodes=(Get-ClusterNode -Cluster $clustername).Name
 $FirstSession=New-PSSession -ComputerName ($ClusterNodes | Select-Object -First 1)
 $OtherSessions=New-PSSession -ComputerName ($ClusterNodes | Select-Object -Skip 1)
+#copy kube locally
+Copy-Item -Path "$env:userprofile\.kube" -Destination "$env:userprofile\Downloads" -FromSession $FirstSession -Recurse -Force
+#copy kube to other nodes
 Foreach ($OtherSession in $OtherSessions){
-    Copy-Item -Path "$env:userprofile\.kube" -Destination $env:userprofile -FromSession $FirstSession -ToSession $OtherSession -Recurse -Force
+    Copy-Item -Path "$env:userprofile\Downloads\.kube" -Destination $env:userprofile -ToSession $OtherSession -Recurse -Force
 }
 
 #VM Sizes
 <#
-$global:vmSizeDefinitions =
-@(
-    # Name, CPU, MemoryGB
-    ([VmSize]::Default, "4", "4"),
-    ([VmSize]::Standard_A2_v2, "2", "4"),
-    ([VmSize]::Standard_A4_v2, "4", "8"),
-    ([VmSize]::Standard_D2s_v3, "2", "8"),
-    ([VmSize]::Standard_D4s_v3, "4", "16"),
-    ([VmSize]::Standard_D8s_v3, "8", "32"),
-    ([VmSize]::Standard_D16s_v3, "16", "64"),
-    ([VmSize]::Standard_D32s_v3, "32", "128"),
-    ([VmSize]::Standard_DS2_v2, "2", "7"),
-    ([VmSize]::Standard_DS3_v2, "2", "14"),
-    ([VmSize]::Standard_DS4_v2, "8", "28"),
-    ([VmSize]::Standard_DS5_v2, "16", "56"),
-    ([VmSize]::Standard_DS13_v2, "8", "56"),
-    ([VmSize]::Standard_K8S_v1, "4", "2"),
-    ([VmSize]::Standard_K8S2_v1, "2", "2"),
-    ([VmSize]::Standard_K8S3_v1, "4", "6"),
-    ([VmSize]::Standard_NK6, "6", "12"),
-    ([VmSize]::Standard_NV6, "6", "64"),
-    ([VmSize]::Standard_NV12, "12", "128")
+Get-AksHciVmSize
 
-)
+          VmSize CPU MemoryGB
+          ------ --- --------
+         Default 4   4
+  Standard_A2_v2 2   4
+  Standard_A4_v2 4   8
+ Standard_D2s_v3 2   8
+ Standard_D4s_v3 4   16
+ Standard_D8s_v3 8   32
+Standard_D16s_v3 16  64
+Standard_D32s_v3 32  128
+ Standard_DS2_v2 2   7
+ Standard_DS3_v2 2   14
+ Standard_DS4_v2 8   28
+ Standard_DS5_v2 16  56
+Standard_DS13_v2 8   56
+ Standard_K8S_v1 4   2
+Standard_K8S2_v1 2   2
+Standard_K8S3_v1 4   6
+
 #>
 #endregion
 
@@ -336,6 +422,9 @@ $sp = New-AzADServicePrincipal -DisplayName $servicePrincipalDisplayName -Scope 
 $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sp.Secret)
 $UnsecureSecret = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 $ClientID=$sp.ApplicationId
+#create credentials
+$SecureSecret= ConvertTo-SecureString $UnsecureSecret -AsPlainText -Force
+$Credentials = New-Object System.Management.Automation.PSCredential ($ClientID.Guid , $SecureSecret)
 
 #register namespace Microsoft.KubernetesConfiguration and Microsoft.Kubernetes
 Register-AzResourceProvider -ProviderNamespace Microsoft.Kubernetes
@@ -343,11 +432,12 @@ Register-AzResourceProvider -ProviderNamespace Microsoft.KubernetesConfiguration
 
 #onboard cluster
 Invoke-Command -ComputerName $ClusterName -ScriptBlock {
-    #generage kubeconfig first
-    Get-AksHciCredential -clusterName demo
+    #Generate kubeconfig
+    Get-AksHciCredential -Name demo
     #onboard
-    Install-AksHciArcOnboarding -clusterName $using:AKSClusterName -tenantId $using:tenantID -subscriptionId $using:subscriptionID -resourcegroup $using:resourcegroup -Location $using:location -clientId $using:ClientID -clientSecret $using:UnsecureSecret
+    Enable-AksHciArcConnection -Name $using:AKSClusterName -tenantId $using:tenantID -subscriptionId $using:subscriptionID -resourcegroup $using:resourcegroup -Location $using:location -credential $using:Credentials
 }
+
 
 #check onboarding
 #generate kubeconfig (this step was already done)
@@ -360,7 +450,7 @@ Invoke-Command -ComputerName $ClusterName -ScriptBlock {
 $session=New-PSSession -ComputerName $ClusterName
 Copy-Item -Path "$env:userprofile\.kube" -Destination $env:userprofile -FromSession $session -Recurse -Force
 #install kubectl
-$uri = "https://kubernetes.io/docs/tasks/tools/install-kubectl/"
+$uri = "https://kubernetes.io/docs/tasks/tools/install-kubectl-windows/"
 $req = Invoke-WebRequest -UseBasicParsing -Uri $uri
 $downloadlink = ($req.Links | where href -Match "kubectl.exe").href
 $downloadLocation="c:\Program Files\AksHci\"
@@ -370,8 +460,8 @@ Start-BitsTransfer $downloadlink -DisplayName "Getting KubeCTL from $downloadlin
 [System.Environment]::SetEnvironmentVariable('PATH',$Env:PATH+';c:\program files\AksHci')
 #alternatively copy kubectl from cluster
 #Copy-Item -Path $env:ProgramFiles\AksHCI\ -Destination $env:ProgramFiles -FromSession $session -Recurse -Force
-#validate onboarding
-kubectl logs job/azure-arc-onboarding -n azure-arc-onboarding --follow
+#validate
+kubectl -n azure-arc get deployments,pods
 #endregion
 
 #region add sample configuration to the cluster https://docs.microsoft.com/en-us/azure/azure-arc/kubernetes/use-gitops-connected-cluster
@@ -439,8 +529,8 @@ $Workspace=Get-AzOperationalInsightsWorkspace -ErrorAction SilentlyContinue | Ou
 #Create Log Analytics Workspace if not available
 if (-not ($Workspace)){
     $SubscriptionID=(Get-AzContext).Subscription.ID
-    $WorkspaceName="WSLabWorkspace-$SubscriptionID"
-    $ResourceGroupName="WSLabAzureArc"
+    $WorkspaceName="MSLabWorkspace-$SubscriptionID"
+    $ResourceGroupName="MSLabAzureArc"
     #Pick Region
     $Location=Get-AzLocation | Where-Object Providers -Contains "Microsoft.OperationalInsights" | Out-GridView -OutputMode Single
     if (-not(Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction SilentlyContinue)){
@@ -505,7 +595,7 @@ Start-BitsTransfer $downloadlink -DisplayName "Getting KubeCTL from $downloadlin
 #region cleanup
 <#
 Get-AzResourceGroup -Name "$ClusterName-rg" | Remove-AzResourceGroup -Force
-Get-AzResourceGroup -Name "WSLabAzureArc" | Remove-AzResourceGroup -Force
+Get-AzResourceGroup -Name "MSLabAzureArc" | Remove-AzResourceGroup -Force
 $principals=Get-AzADServicePrincipal -DisplayNameBeginsWith $ClusterName
 foreach ($principal in $principals){
     Remove-AzADServicePrincipal -ObjectId $principal.id -Force
@@ -519,70 +609,17 @@ Get-AzADApplication -DisplayNameStartWith $ClusterName | Remove-AzADApplication 
 #TBD: Enable monitoring
 #https://docs.microsoft.com/en-us/azure/azure-monitor/insights/container-insights-enable-arc-enabled-clusters
 
-######################################
-# following code is work-in-progress #
-######################################
-
-######################
-### Run from Win10 ###
-######################
-
-#region Windows Admin Center on Win10
-
-    #install WAC
-    #Download Windows Admin Center if not present
-    if (-not (Test-Path -Path "$env:USERPROFILE\Downloads\WindowsAdminCenter.msi")){
-        Start-BitsTransfer -Source https://aka.ms/WACDownload -Destination "$env:USERPROFILE\Downloads\WindowsAdminCenter.msi"
-    }
-    #Install Windows Admin Center (https://docs.microsoft.com/en-us/windows-server/manage/windows-admin-center/deploy/install)
-    Start-Process msiexec.exe -Wait -ArgumentList "/i $env:USERPROFILE\Downloads\WindowsAdminCenter.msi /qn /L*v log.txt SME_PORT=6516 SSL_CERTIFICATE_OPTION=generate"
-    #Open Windows Admin Center
-    Start-Process "C:\Program Files\Windows Admin Center\SmeDesktop.exe"
-
-#endregion
-
-#region setup AKS (win10)
-    #import wac module
-    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
-    Import-Module "$env:ProgramFiles\windows admin center\PowerShell\Modules\ExtensionTools"
-    # List feeds
-    Get-Feed "https://localhost:6516/"
-
-
-    #add feed
-    #download nupgk (included in aks-hci module)
-    Start-BitsTransfer -Source "https://aka.ms/aks-hci-download" -OutFile "$env:USERPROFILE\Downloads\AKS-HCI-Public-Preview-Oct-2020.zip"
-    #unzip
-    Expand-Archive -Path "$env:USERPROFILE\Downloads\AKS-HCI-Public-Preview-Oct-2020.zip" -DestinationPath "$env:USERPROFILE\Downloads" -Force
-    Expand-Archive -Path "$env:USERPROFILE\Downloads\AksHci.Powershell.zip" -DestinationPath "$env:USERPROFILE\Downloads\AksHci.Powershell" -Force
-    $Filename=Get-ChildItem -Path $env:userprofile\downloads\ | Where-Object Name -like "msft.sme.aks.*.nupkg"
-    New-Item -Path "C:\WACFeeds\" -Name Feeds -ItemType Directory -Force
-    Copy-Item -Path $FileName.FullName -Destination "C:\WACFeeds\"
-    Add-Feed -GatewayEndpoint "https://localhost:6516/" -Feed "C:\WACFeeds\"
-
-    # List Kubernetes extensions (you need to log into WAC in Edge for this command to succeed)
-    Get-Extension "https://localhost:6516/" | where title -like *kubernetes*
-
-    # Install Kubernetes Extension
-    $extension=Get-Extension "https://localhost:6516/" | where title -like *kubernetes*
-    Install-Extension -ExtensionId $extension.id
-
-#endregion
-
-###################
-### Run from DC ###
-###################
-
 #region Windows Admin Center on GW
 
 #Install Edge
-Start-BitsTransfer -Source "https://aka.ms/edge-msi" -Destination "$env:USERPROFILE\Downloads\MicrosoftEdgeEnterpriseX64.msi"
-#start install
-Start-Process -Wait -Filepath msiexec.exe -Argumentlist "/i $env:UserProfile\Downloads\MicrosoftEdgeEnterpriseX64.msi /q"
-#start Edge
-start-sleep 5
-& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-
+if (-not (test-path "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")){
+    Start-BitsTransfer -Source "https://aka.ms/edge-msi" -Destination "$env:USERPROFILE\Downloads\MicrosoftEdgeEnterpriseX64.msi"
+    #start install
+    Start-Process -Wait -Filepath msiexec.exe -Argumentlist "/i $env:UserProfile\Downloads\MicrosoftEdgeEnterpriseX64.msi /q"
+    #start Edge
+    start-sleep 5
+    & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+}
 
 #install WAC
 $GatewayServerName="WACGW"
@@ -602,7 +639,7 @@ Invoke-Command -Session $session -ScriptBlock {
 
 $Session | Remove-PSSession
 
-#add certificate to trusted root certs
+#add certificate to trusted root certs (not recommended for production)
 start-sleep 10
 $cert = Invoke-Command -ComputerName $GatewayServerName -ScriptBlock {Get-ChildItem Cert:\LocalMachine\My\ |where subject -eq "CN=Windows Admin Center"}
 $cert | Export-Certificate -FilePath $env:TEMP\WACCert.cer
@@ -617,80 +654,22 @@ foreach ($computer in $computers){
     Set-ADComputer -Identity $computerObject -PrincipalsAllowedToDelegateToAccount $gatewayObject
 }
 
-#Download AKS HCI module
-Start-BitsTransfer -Source "https://aka.ms/aks-hci-download" -Destination "$env:USERPROFILE\Downloads\AKS-HCI-Public-Preview-Oct-2020.zip"
-#unzip
-Expand-Archive -Path "$env:USERPROFILE\Downloads\AKS-HCI-Public-Preview-Oct-2020.zip" -DestinationPath "$env:USERPROFILE\Downloads" -Force
-Expand-Archive -Path "$env:USERPROFILE\Downloads\AksHci.Powershell.zip" -DestinationPath "$env:USERPROFILE\Downloads" -Force
-
-#copy nupkg to WAC
-$GatewayServerName="WACGW1"
-$PSSession=New-PSSession -ComputerName $GatewayServerName
-$Filename=Get-ChildItem -Path $env:userprofile\downloads\ | where Name -like "msft.sme.aks.*.nupkg"
-Invoke-Command -ComputerName $GatewayServerName -ScriptBlock {
-    New-Item -Path "C:\WACFeeds\" -Name Feeds -ItemType Directory -Force
-}
-Copy-Item -Path $FileName.FullName -Destination "C:\WACFeeds\" -ToSession $PSSession
-
-#grab WAC Posh from GW
-Copy-Item -Recurse -Force -Path "$env:ProgramFiles\windows admin center\PowerShell\Modules\ExtensionTools" -Destination "$env:ProgramFiles\windows admin center\PowerShell\Modules\" -FromSession $PSSession
-
-#import wac module
-Import-Module "$env:ProgramFiles\windows admin center\PowerShell\Modules\ExtensionTools"
-
-# List feeds
-Get-Feed "https://$GatewayServerName"
-#add feed
-Add-Feed -GatewayEndpoint "https://$GatewayServerName" -Feed "C:\WACFeeds\"
-
-# List all extensions Does not work
-Get-Extension "https://$GatewayServerName"
-
-<#
-PS C:\Windows\system32> Get-Extension "https://$GatewayServerName"
-Invoke-WebRequest : {"error":{"code":"PathTooLongException","message":"The specified path, file name, or both are too
-long. The fully qualified file name must be less than 260 characters, and the directory name must be less than 248
-characters."}}
-At C:\Program Files\windows admin center\PowerShell\Modules\ExtensionTools\ExtensionTools.psm1:236 char:17
-+     $response = Invoke-WebRequest @params
-+                 ~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-WebRequest], WebExc
-   eption
-    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand
-Failed to get the extensions
-At C:\Program Files\windows admin center\PowerShell\Modules\ExtensionTools\ExtensionTools.psm1:238 char:9
-+         throw "Failed to get the extensions"
-+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : OperationStopped: (Failed to get the extensions:String) [], RuntimeException
-    + FullyQualifiedErrorId : Failed to get the extensions
-#>
-
 #endregion
 
-<#setup AKS (WAC GW) - does not work, bug
-    #copy nupkg to WAC
-    $GatewayServerName="WACGW1"
-    $PSSession=New-PSSession -ComputerName $GatewayServerName
-    $Filename=Get-ChildItem -Path $env:userprofile\downloads\ | where Name -like "msft.sme.aks.*.nupkg"
-    Invoke-Command -ComputerName $GatewayServerName -ScriptBlock {
-        New-Item -Path "C:\WACFeeds\" -Name Feeds -ItemType Directory -Force
+######################
+### Run from Win10 ###
+######################
+
+#region Windows Admin Center on Win10
+
+    #install WAC
+    #Download Windows Admin Center if not present
+    if (-not (Test-Path -Path "$env:USERPROFILE\Downloads\WindowsAdminCenter.msi")){
+        Start-BitsTransfer -Source https://aka.ms/WACDownload -Destination "$env:USERPROFILE\Downloads\WindowsAdminCenter.msi"
     }
-    Copy-Item -Path $FileName.FullName -Destination "C:\WACFeeds\" -ToSession $PSSession
+    #Install Windows Admin Center (https://docs.microsoft.com/en-us/windows-server/manage/windows-admin-center/deploy/install)
+    Start-Process msiexec.exe -Wait -ArgumentList "/i $env:USERPROFILE\Downloads\WindowsAdminCenter.msi /qn /L*v log.txt SME_PORT=6516 SSL_CERTIFICATE_OPTION=generate"
+    #Open Windows Admin Center
+    Start-Process "C:\Program Files\Windows Admin Center\SmeDesktop.exe"
 
-
-    #grab WAC Posh from GW
-    Copy-Item -Recurse -Force -Path "$env:ProgramFiles\windows admin center\PowerShell\Modules\ExtensionTools" -Destination "$env:ProgramFiles\windows admin center\PowerShell\Modules\" -FromSession $PSSession
-
-    #import wac module
-    Import-Module "$env:ProgramFiles\windows admin center\PowerShell\Modules\ExtensionTools"
-
-    # List feeds
-    Get-Feed "https://$GatewayServerName"
-    #add feed
-    Add-Feed -GatewayEndpoint "https://$GatewayServerName" -Feed "C:\WACFeeds\"
-
-    # List all extensions Does not work
-    Get-Extension "https://$GatewayServerName"
-
-#>
-
+#endregion
