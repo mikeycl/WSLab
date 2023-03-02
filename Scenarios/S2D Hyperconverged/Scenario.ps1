@@ -2,6 +2,8 @@
 # Run from DC or Management VM #
 ################################
 
+#note: this scenario is bit obsolete, use https://github.com/microsoft/MSLab/tree/master/Scenarios/AzSHCI%20Deployment instead
+
 $StartDateTime = get-date
 Write-host "Script started at $StartDateTime"
 
@@ -558,7 +560,7 @@ Write-host "Script started at $StartDateTime"
                 Install-WindowsFeature -Name RSAT-Clustering-PowerShell -ComputerName $ClusterNode
             }
         #add role
-            Add-CauClusterRole -ClusterName $ClusterName -MaxFailedNodes 0 -RequireAllNodesOnline -EnableFirewallRules -VirtualComputerObjectName $CAURoleName -Force -CauPluginName Microsoft.WindowsUpdatePlugin -MaxRetriesPerNode 3 -CauPluginArguments @{ 'IncludeRecommendedUpdates' = 'False' } -StartDate "3/2/2017 3:00:00 AM" -DaysOfWeek 4 -WeeksOfMonth @(3) -verbose
+            Add-CauClusterRole -ClusterName $ClusterName -MaxFailedNodes 0 -RequireAllNodesOnline -EnableFirewallRules -GroupName $CAURoleName -VirtualComputerObjectName $CAURoleName -Force -CauPluginName Microsoft.WindowsUpdatePlugin -MaxRetriesPerNode 3 -CauPluginArguments @{ 'IncludeRecommendedUpdates' = 'False' } -StartDate "3/2/2017 3:00:00 AM" -DaysOfWeek 4 -WeeksOfMonth @(3) -verbose
     }
 #endregion
 

@@ -525,7 +525,7 @@ If (-not $isAdmin) {
         }
         if (!(Test-Path "$PSScriptRoot\ParentDisks\tools.vhdx")){
             WriteInfoHighlighted "Creating Tools.vhdx"
-            $toolsVHD=New-VHD -Path "$PSScriptRoot\ParentDisks\tools.vhdx" -SizeBytes 30GB -Dynamic
+            $toolsVHD=New-VHD -Path "$PSScriptRoot\ParentDisks\tools.vhdx" -SizeBytes 300GB -Dynamic
             #mount and format VHD
                 $VHDMount = Mount-VHD $toolsVHD.Path -Passthru
                 $vhddisk = $VHDMount| get-disk 
@@ -603,6 +603,10 @@ If (-not $isAdmin) {
             if ($LabConfig.Secureboot -eq $False) {$DC | Set-VMFirmware -EnableSecureBoot Off}
             if ($DC.AutomaticCheckpointsEnabled -eq $True){
                 $DC | Set-VM -AutomaticCheckpointsEnabled $False
+            }
+            if ($LabConfig.InstallSCVMM -eq "Yes"){
+                #SCVMM 2022 requires 4GB of memory
+                $DC | Set-VMMemory -StartupBytes 4GB -MinimumBytes 4GB
             }
 
         #Apply Unattend to VM
@@ -1017,8 +1021,12 @@ If (-not $isAdmin) {
                 Invoke-Command -VMGuid $DC.id -Credential $cred -ScriptBlock {
                     Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope Process -Force
                     d:\scvmm\1_SQL_Install.ps1
-                    d:\scvmm\2_ADK_Install.ps1  
-                    Restart-Computer    
+                    d:\scvmm\2_ADK_Install.ps1
+                    #install prereqs
+                    if (Test-Path "D:\SCVMM\SCVMM\Prerequisites\VCRedist\amd64\vcredist_x64.exe"){
+                        Start-Process -FilePath "D:\SCVMM\SCVMM\Prerequisites\VCRedist\amd64\vcredist_x64.exe" -ArgumentList "/passive /quiet /norestart" -Wait
+                    }
+                    Restart-Computer
                 }
                 Start-Sleep 10
 
@@ -1112,7 +1120,13 @@ If (-not $isAdmin) {
         <# 0 #> New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", "Cleanup .\Temp\ 1_Prereq.ps1 2_CreateParentDisks.ps1 and rename 3_deploy.ps1 to just deploy.ps1"
         <# 1 #> New-Object System.Management.Automation.Host.ChoiceDescription "&No", "Keep files (in case DC was not created sucessfully)"
     )
-    $response = $host.UI.PromptForChoice("Unnecessary files cleanup","Do you want to cleanup unnecessary files and folders?", $options, 0 <#default option#>)
+    
+    If (!$LabConfig.AutoCleanUp) {
+        $response = $host.UI.PromptForChoice("Unnecessary files cleanup","Do you want to cleanup unnecessary files and folders?", $options, 0 <#default option#>)
+    }
+    else {
+        $response = 0
+    }
 
     If ($response -eq 1){
         $renamed = $false
@@ -1193,8 +1207,11 @@ If (-not $isAdmin) {
         Send-TelemetryEvents -Events $events | Out-Null
     }
 
-    Stop-Transcript
+Stop-Transcript
+
+If (!$LabConfig.AutoClosePSWindows) {
     WriteSuccess "Job Done. Press enter to continue..."
     Read-Host | Out-Null
+}
 
 #endregion

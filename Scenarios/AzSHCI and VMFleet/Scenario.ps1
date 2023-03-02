@@ -12,6 +12,15 @@
 #endregion
 
 #region Configure VMFleet prereqs
+
+    #configure thin volumes a default if available (because why not :)
+    $OSInfo=Invoke-Command -ComputerName $ClusterName -ScriptBlock {
+        Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\'
+    }
+    if ($OSInfo.productname -eq "Azure Stack HCI" -and $OSInfo.CurrentBuild -ge 20348){
+        Get-StoragePool -CimSession $ClusterName -FriendlyName S2D* | Set-StoragePool -ProvisioningTypeDefault Thin
+    }
+
     #Create Volumes
     Foreach ($Node in $Nodes){
         if (-not (Get-Virtualdisk -CimSession $ClusterName -FriendlyName $Node -ErrorAction Ignore)){
@@ -46,6 +55,12 @@
 
 #region install and create VMFleet
     $VHDName=$VHDPath | Split-Path -Leaf
+    $AdminUsername="CORP\LabAdmin"
+    $AdminPassword="LS1setup!"
+    $securedpassword = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+    $Credentials = New-Object System.Management.Automation.PSCredential ($AdminUsername, $securedpassword)
+
+    $VHDAdminPassword="P@ssw0rd"
     #Enable CredSSP
     # Temporarily enable CredSSP delegation to avoid double-hop issue
     foreach ($Node in $Nodes){
@@ -53,16 +68,13 @@
     }
     Invoke-Command -ComputerName $Nodes -ScriptBlock { Enable-WSManCredSSP Server -Force }
 
-    $password = ConvertTo-SecureString "LS1setup!" -AsPlainText -Force
-    $Credentials = New-Object System.Management.Automation.PSCredential ("CORP\LabAdmin", $password)
-
     Invoke-Command -ComputerName $Nodes[0] -Credential $Credentials -Authentication Credssp -ScriptBlock {
-        Install-Fleet #as vmfleet has issues with Install-Fleet -ClusterName https://github.com/microsoft/diskspd/issues/157
-        #It's probably more convenient to run this command on cluster as all VHD copying will happen on cluster itself.
+        Install-Fleet #as vmfleet has issues with Install-Fleet -ClusterName https://github.com/microsoft/diskspd/issues/172
+        #It's probably more convenient to run this command on cluster (using invoke-command) as all VHD copying will happen on cluster itself.
         #Grab nubmer of Logical Processors per node divided by 2 (Hyper thread CPUs) - no need to do it, this will happen automagically if -VMs not specified
         #$NumberOfVMs=(Get-CimInstance -ClassName Win32_ComputerSystem).NumberOfLogicalProcessors/2
         #New-Fleet -BaseVHD "c:\ClusterStorage\Collect\$using:VHDName" -VMs $using:NumberOfVMs -AdminPass P@ssw0rd -Admin Administrator -ConnectUser corp\LabAdmin -ConnectPass LS1setup!
-        New-Fleet -BaseVHD "c:\ClusterStorage\Collect\$using:VHDName" -AdminPass P@ssw0rd -Admin Administrator -ConnectUser corp\LabAdmin -ConnectPass LS1setup!
+        New-Fleet -BaseVHD "c:\ClusterStorage\Collect\$using:VHDName" -AdminPass $using:VHDAdminPassword -Admin Administrator -ConnectUser $using:AdminUsername -ConnectPass $using:AdminPassword
     }
 
     # Disable CredSSP
@@ -77,6 +89,14 @@
     foreach ($Session in $Sessions){
         Copy-Item -Path 'C:\Program Files\WindowsPowerShell\Modules\PrivateCloud.DiagnosticInfo' -Destination 'C:\Program Files\WindowsPowerShell\Modules\' -ToSession $Session -Recurse -Force
     }
+
+    #make sure iDRAC NICs are disabled (since it's same APIPA range like vmfleet adapters, it's better to be disabled as it might disturb results copy from vmfleet VMs)
+    Get-Netadapter -CimSession $Nodes -InterfaceDescription "Remote NDIS Compatible Device" | Disable-NetAdapter -Confirm:0
+
+    #Configure VMFleet cluster network role to be none, and name to be vmfleet
+    $Network=(Get-ClusterNetworkInterface -Cluster $ClusterName | Where-Object Name -like *FleetInternal*).Network | Select-Object -Unique
+    $Network.Role="none"
+    $Network.Name="vmfleet"
 
     # Temporarily enable CredSSP delegation to avoid double-hop issue
     foreach ($Node in $Nodes){
@@ -94,6 +114,10 @@
     # Disable CredSSP
     Disable-WSManCredSSP -Role Client
     Invoke-Command -ComputerName $nodes -ScriptBlock { Disable-WSManCredSSP Server }
+
+    #re-enable iDRAC NICs
+    Get-Netadapter -CimSession $Nodes -InterfaceDescription "Remote NDIS Compatible Device" | Enable-NetAdapter -Confirm:0
+
 #endregion
 
 #region Remove Fleet
@@ -103,8 +127,8 @@
     }
     Invoke-Command -ComputerName $Nodes -ScriptBlock { Enable-WSManCredSSP Server -Force }
 
-    $password = ConvertTo-SecureString "LS1setup!" -AsPlainText -Force
-    $Credentials = New-Object System.Management.Automation.PSCredential ("CORP\LabAdmin", $password)
+    $securedpassword = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+    $Credentials = New-Object System.Management.Automation.PSCredential ($AdminUsername, $securedpassword)
 
     Invoke-Command -ComputerName $Nodes[0] -Credential $Credentials -Authentication Credssp -ScriptBlock {
         Remove-Fleet
@@ -114,9 +138,38 @@
     Disable-WSManCredSSP -Role Client
     Invoke-Command -ComputerName $nodes -ScriptBlock { Disable-WSManCredSSP Server }
 
-    # Remove CSVs
+    # Remove CSVs/
     foreach ($Node in $Nodes){
         Remove-VirtualDisk -FriendlyName $Node -CimSession $ClusterName -Confirm:0 
     }
     Remove-VirtualDisk -FriendlyName Collect -CimSession $ClusterName -Confirm:0 
+#endregion
+
+
+#### TBD ####
+
+#region Customize measurement
+    #Stop all VMs
+    Stop-Fleet -Cluster $ClusterName
+    #Adjust VMs size
+    Set-Fleet -Cluster $ClusterName -ProcessorCount 1 -MemoryStartupBytes 2GB
+    #Start all VMs
+    Start-Fleet -Cluster $ClusterName
+
+    #show profile
+    #note: default profiles are defined in PowerShell module (Peak,General,VDI and SQL)
+    #Notepad "$((Get-Module VMFleet).ModuleBase)\Profile.psm1"
+
+    $Profile=Get-FleetProfileXml -Name General -WriteRatio 0 -BlockSize 4kb -Warmup 30 -Duration 60 -Cooldown 30
+    Start-FleetRun -Cluster $ClusterName -ProfileXml $Profile
+
+    #if profile was already captured, then you ave to delete result first
+    #Get-ChildItem -Path \\$ClusterName\ClusterStorage$\Collect\result | Remove-Item -Confirm:0
+
+    #or run custom tests without profile
+    #move VMs first (Does not work)
+    #Move-Fleet -Cluster $ClusterName –DistributeVMPercent 100
+    #run test (Does not work well)
+    #Start-FleetSweep -Cluster $ClusterName -b 4 -t 2 -o 4 -w 0 -d 60 -p r -Warm 10 -Cool 10
+
 #endregion

@@ -20,7 +20,7 @@
         $ClusterIP="10.0.0.111" #If blank (you can write just $ClusterIP="", DHCP will be used). If $DistributedManagementPoint is true, then IP is not used
 
     #Distributed Cluster ManagementPoint? (Cluster Name in DNS will have IP of every node - like SOFS). If $ClusterIP is set, then $clusterIP will be ignored).
-        $DistributedManagementPoint=$true
+        $DistributedManagementPoint=$false
 
     #Witness type
         $WitnessType="FileShare" #or Cloud
@@ -28,7 +28,7 @@
         <#
         $CloudWitnessStorageAccountName="MyStorageAccountName"
         $CloudWitnessStorageKey="qi8QB/VSHHiA9lSvz1kEIEt0JxIucPL3l99nRHhkp+n1Lpabu4Ydi7Ih192A4VW42vccIgUnrXxxxxxxxxxxxx=="
-        $CloudWitnessEndpoint="core.windows.net“
+        $CloudWitnessEndpoint="core.windows.net"
         #>
 
     #Perform Windows update? (for more info visit WU Scenario https://github.com/microsoft/WSLab/tree/dev/Scenarios/Windows%20Update)
@@ -36,7 +36,7 @@
 
     ## Networking ##
         $vSwitchName="vSwitch"
-        
+
         $NumberOfStorageNets=1 #1 or 2
 
         #IF Stornet is 1
@@ -104,6 +104,12 @@
 
     #Memory dump type (Active or Kernel) https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/varieties-of-kernel-mode-dump-files
         $MemoryDump="Active"
+
+    #Delete Storage Pool (like after reinstall there might be data left from old cluster)
+        $DeletePool=$false
+
+    #Enable Secured Core features
+        $SecuredCore=$false
 
     #real VMs? If true, script will create real VMs on mirror disks from vhd you will provide during the deployment. The most convenient is to provide NanoServer
         $realVMs=$false
@@ -210,14 +216,16 @@
                                         IsInstalled=1 and DeploymentAction='Installation' and RebootRequired=1 or
                                         IsInstalled=0 and DeploymentAction='Uninstallation' and RebootRequired=1"
                 $SearchResult = $Searcher.Search($SearchCriteriaAllUpdates).Updates
-                $Session = New-Object -ComObject Microsoft.Update.Session
-                $Downloader = $Session.CreateUpdateDownloader()
-                $Downloader.Updates = $SearchResult
-                $Downloader.Download()
-                $Installer = New-Object -ComObject Microsoft.Update.Installer
-                $Installer.Updates = $SearchResult
-                $Result = $Installer.Install()
-                $Result
+                if ($SearchResult.Count -gt 0){
+                    $Session = New-Object -ComObject Microsoft.Update.Session
+                    $Downloader = $Session.CreateUpdateDownloader()
+                    $Downloader.Updates = $SearchResult
+                    $Downloader.Download()
+                    $Installer = New-Object -ComObject Microsoft.Update.Installer
+                    $Installer.Updates = $SearchResult
+                    $Result = $Installer.Install()
+                    $Result
+                }
             }
             #remove temporary PSsession config
             Invoke-Command -ComputerName $servers -ScriptBlock {
@@ -240,14 +248,16 @@
                                     IsInstalled=1 and DeploymentAction='Installation' and RebootRequired=1 or
                                     IsInstalled=0 and DeploymentAction='Uninstallation' and RebootRequired=1"
             $SearchResult = $Searcher.Search($SearchCriteriaAllUpdates).Updates
-            $Session = New-Object -ComObject Microsoft.Update.Session
-            $Downloader = $Session.CreateUpdateDownloader()
-            $Downloader.Updates = $SearchResult
-            $Downloader.Download()
-            $Installer = New-Object -ComObject Microsoft.Update.Installer
-            $Installer.Updates = $SearchResult
-            $Result = $Installer.Install()
-            $Result
+            if ($SearchResult.Count -gt 0){
+                $Session = New-Object -ComObject Microsoft.Update.Session
+                $Downloader = $Session.CreateUpdateDownloader()
+                $Downloader.Updates = $SearchResult
+                $Downloader.Download()
+                $Installer = New-Object -ComObject Microsoft.Update.Installer
+                $Installer.Updates = $SearchResult
+                $Result = $Installer.Install()
+                $Result
+            }
         }
         #remove temporary PSsession config
         Invoke-Command -ComputerName $servers -ScriptBlock {
@@ -359,6 +369,29 @@
             Invoke-Command -ComputerName $servers -ScriptBlock {powercfg /list}
     }
 
+    #Enable secured core
+    if ($SecuredCore){
+        Invoke-Command -ComputerName $servers -ScriptBlock {
+            #Device Guard
+            #REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "Locked" /t REG_DWORD /d 1 /f 
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "EnableVirtualizationBasedSecurity" /t REG_DWORD /d 1 /f
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "RequirePlatformSecurityFeatures" /t REG_DWORD /d 3 /f
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "RequireMicrosoftSignedBootChain" /t REG_DWORD /d 1 /f
+    
+            #Cred Guard
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LsaCfgFlags" /t REG_DWORD /d 1 /f
+    
+            #System Guard Secure Launch
+            #https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-system-guard/system-guard-secure-launch-and-smm-protection
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\SystemGuard" /v "Enabled" /t REG_DWORD /d 1 /f
+    
+            #HVCI
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" /v "Enabled" /t REG_DWORD /d 1 /f
+            #REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" /v "Locked" /t REG_DWORD /d 1 /f
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" /v "HVCIMATRequired" /t REG_DWORD /d 1 /f
+        }
+    }
+
     #install roles and features
         #install Hyper-V using DISM if Install-WindowsFeature fails (if nested virtualization is not enabled install-windowsfeature fails)
         Invoke-Command -ComputerName $servers -ScriptBlock {
@@ -390,17 +423,17 @@
 #Disable unused (disconnected) adapters
     Get-Netadapter -CimSession $Servers | Where-Object Status -ne "Up" | Disable-NetAdapter -Confirm:0
 
-    #Grab fastest adapters and sort by name #Create Virtual Switches and Virtual Adapters
+    #Create vSwitch and use the fastest NICs in the server
         if ($SRIOV){
             Invoke-Command -ComputerName $servers -ScriptBlock {
-                $FastestLinkSpeed=(get-netadapter | Where-Object Status -eq Up).LinkSpeed| Sort-Object | Select-Object -First 1
-                $NetAdapters=Get-NetAdapter | Where-Object Status -eq Up | Where-Object Linkspeed -eq $FastestLinkSpeed | Sort-Object Name
+                $FastestLinkSpeed=(get-netadapter | Where-Object Status -eq Up).Speed| Sort-Object -Descending | Select-Object -First 1
+                $NetAdapters=Get-NetAdapter | Where-Object Status -eq Up | Where-Object Speed -eq $FastestLinkSpeed | Sort-Object Name
                 New-VMSwitch -Name $using:vSwitchName -EnableEmbeddedTeaming $TRUE -EnableIov $true -NetAdapterName $NetAdapters.Name
             }
         }else{
             Invoke-Command -ComputerName $servers -ScriptBlock {
-                $FastestLinkSpeed=(get-netadapter | Where-Object Status -eq Up).LinkSpeed| Sort-Object | Select-Object -First 1
-                $NetAdapters=Get-NetAdapter | Where-Object Status -eq Up | Where-Object Linkspeed -eq $FastestLinkSpeed | Sort-Object Name
+                $FastestLinkSpeed=(get-netadapter | Where-Object Status -eq Up).Speed| Sort-Object -Descending| Select-Object -First 1
+                $NetAdapters=Get-NetAdapter | Where-Object Status -eq Up | Where-Object Speed -eq $FastestLinkSpeed | Sort-Object Name
                 New-VMSwitch -Name $using:vSwitchName -EnableEmbeddedTeaming $TRUE -NetAdapterName $NetAdapters.Name
             }
         }
@@ -512,6 +545,11 @@
                 }
             }
 
+        #Configure dcbxmode to be host in charge (default is firmware in charge) on mellanox adapters
+        if (Get-NetAdapter -CimSession $Servers -InterfaceDescription Mellanox*){
+            Set-NetAdapterAdvancedProperty -CimSession $Servers -InterfaceDescription Mellanox* -DisplayName 'Dcbxmode' -DisplayValue 'Host in charge'
+        }
+
     #configure DCB if requested
         if ($DCB -eq $True){
             #Install DCB
@@ -539,7 +577,7 @@
             #Apply policy to the target adapters.  The target adapters are adapters connected to vSwitch
                 Invoke-Command -ComputerName $servers -ScriptBlock {Enable-NetAdapterQos -InterfaceDescription (Get-VMSwitch).NetAdapterInterfaceDescriptions}
 
-            #Create a Traffic class and give SMB Direct 60% of the bandwidth minimum. The name of the class will be "SMB".
+            #Create a Traffic class and give SMB Direct 50% of the bandwidth minimum. The name of the class will be "SMB".
             #This value needs to match physical switch configuration. Value might vary based on your needs.
             #If connected directly (in 2 node configuration) skip this step.
                 Invoke-Command -ComputerName $servers -ScriptBlock {New-NetQosTrafficClass "SMB"       -Priority 3 -BandwidthPercentage 50 -Algorithm ETS}
@@ -562,6 +600,8 @@
         Get-NetAdapterAdvancedProperty -CimSession $servers -DisplayName "Jumbo Packet"
         #verify RDMA settings
         Get-NetAdapterRdma -CimSession $servers | Sort-Object -Property Systemname | Format-Table systemname,interfacedescription,name,enabled -AutoSize -GroupBy Systemname
+        #verify DCBXMode
+        Get-NetAdapterAdvancedProperty -CimSession $Servers -InterfaceDescription Mellanox* -DisplayName 'Dcbxmode'
         #validate if VLANs were set
         Get-VMNetworkAdapterVlan -CimSession $Servers -ManagementOS
         #verify ip config 
@@ -581,6 +621,20 @@
 #endregion
 
 #region Create cluster and configure basic settings
+    #Delete Storage Pool if there is any from last install
+    if ($DeletePool){
+        #Grab pools
+        $StoragePools=Get-StoragePool -CimSession $Servers -IsPrimordial $False -ErrorAction Ignore
+        #remove pools if any
+        if ($StoragePools){
+            $StoragePools | Remove-StoragePool -Confirm:0
+        }
+        #Reset disks (to clear spaces metadata)
+        Invoke-Command -ComputerName $Servers -ScriptBlock {
+            Get-PhysicalDisk -CanPool $True | Reset-PhysicalDisk
+        }
+    }
+
     if ($DellHW){
         #Disable USB NIC used by iDRAC to communicate to host just for test-cluster
         Disable-NetAdapter -CimSession $Servers -InterfaceDescription "Remote NDIS Compatible Device" -Confirm:0
@@ -807,7 +861,6 @@
 #endregion
 
 #region Enable Cluster S2D and check Pool and Tiers
-
     #Enable-ClusterS2D
         Enable-ClusterS2D -CimSession $ClusterName -confirm:0 -Verbose
 
@@ -840,50 +893,14 @@
 
 #endregion
 
-#region Create Volumes to use max capacity. It also depends what mix of devices you have https://github.com/Microsoft/WSLab/tree/master/Scenarios/S2D%20and%20Volumes%20deep%20dive
-
-    #calculate reserve
-    $pool=Get-StoragePool -CimSession $clustername -FriendlyName s2D*
-    $HDDCapacity= ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq HDD | Measure-Object -Property Size -Sum).Sum
-    $HDDMaxSize=  ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq HDD | Measure-Object -Property Size -Maximum).Maximum
-    $SSDCapacity= ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq SSD | where-object usage -ne journal | Measure-Object -Property Size -Sum).Sum
-    $SSDMaxSize=  ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq SSD | where-object usage -ne journal | Measure-Object -Property Size -Maximum).Maximum
-
-    $numberofNodes=(Get-ClusterNode -Cluster $clustername).count
-    if ($numberofNodes -eq 2){
-        if ($SSDCapacity){
-        $SSDCapacityToUse=$SSDCapacity-($numberofNodes*$SSDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
-        $sizeofvolumeonSSDs=$SSDCapacityToUse/2/$numberofNodes
-        }
-        if ($HDDCapacity){
-        $HDDCapacityToUse=$HDDCapacity-($numberofNodes*$HDDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
-        $sizeofvolumeonHDDs=$HDDCapacityToUse/2/$numberofNodes
-        }
-    }else{
-        if ($SSDCapacity){
-        $SSDCapacityToUse=$SSDCapacity-($numberofNodes*$SSDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
-        $sizeofvolumeonSSDs=$SSDCapacityToUse/3/$numberofNodes
-        }
-        if ($HDDCapacity){
-        $HDDCapacityToUse=$HDDCapacity-($numberofNodes*$HDDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
-        $sizeofvolumeonHDDs=$HDDCapacityToUse/3/$numberofNodes
-        }
-    }
-
-    #create volumes
-    1..$numberofNodes | ForEach-Object {
-        if ($sizeofvolumeonHDDs){
-            New-Volume -CimSession $ClusterName -FileSystem CSVFS_ReFS -StoragePoolFriendlyName S2D* -Size $sizeofvolumeonHDDs -FriendlyName "MyVolumeonHDDs$_" -MediaType HDD
-        }
-        if ($sizeofvolumeonSSDs){
-            New-Volume -CimSession $ClusterName -FileSystem CSVFS_ReFS -StoragePoolFriendlyName S2D* -Size $sizeofvolumeonSSDs -FriendlyName "MyVolumeonSSDs$_" -MediaType SSD   
-        }
-    }
-
-    start-sleep 10
-#endregion
-
 #region Register Azure Stack HCI to Azure
+    if ($DellHW){
+        #Add OEM Information so hardware is correctly billed
+        Invoke-Command -ComputerName $Servers -ScriptBlock {
+            New-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation" -Name SupportProvider -Value DellEMC​
+        }
+    }
+
     #download Azure module
     Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
     if (!(Get-InstalledModule -Name Az.StackHCI -ErrorAction Ignore)){
@@ -915,14 +932,16 @@
         $servers=(Get-ClusterNode -Cluster $ClusterName).Name
         Invoke-Command -ComputerName $servers -ScriptBlock {wevtutil.exe sl /q /e:true Microsoft-AzureStack-HCI/Debug}
     #register Azure Stack HCI
-        $ResourceGroupName="AzureStackHCIClusters"
+        $ResourceGroupName="" #if blank, default will be used
         if (!(Get-InstalledModule -Name Az.Resources -ErrorAction Ignore)){
             Install-Module -Name Az.Resources -Force
         }
         #choose location for cluster (and RG)
         $region=(Get-AzLocation | Where-Object Providers -Contains "Microsoft.AzureStackHCI" | Out-GridView -OutputMode Single -Title "Please select Location for AzureStackHCI metadata").Location
-        If (-not (Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction Ignore)){
-            New-AzResourceGroup -Name $ResourceGroupName -Location $region
+        if ($ResourceGroupName){
+            If (-not (Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction Ignore)){
+                New-AzResourceGroup -Name $ResourceGroupName -Location $region
+            }
         }
         #Register AZSHCi without prompting for creds
         $armTokenItemResource = "https://management.core.windows.net/"
@@ -933,8 +952,11 @@
         $armToken = $authFactory.Authenticate($azContext.Account, $azContext.Environment, $azContext.Tenant.Id, $null, [Microsoft.Azure.Commands.Common.Authentication.ShowDialog]::Never, $null, $armTokenItemResource).AccessToken
         $id = $azContext.Account.Id
         #Register-AzStackHCI -SubscriptionID $subscriptionID -ComputerName $ClusterName -GraphAccessToken $graphToken -ArmAccessToken $armToken -AccountId $id
-        Register-AzStackHCI -Region $Region -SubscriptionID $subscriptionID -ComputerName  $ClusterName -GraphAccessToken $graphToken -ArmAccessToken $armToken -AccountId $id -ResourceName $ClusterName -ResourceGroupName $ResourceGroupName
-
+        if ($ResourceGroupName){
+            Register-AzStackHCI -Region $Region -SubscriptionID $subscriptionID -ComputerName  $ClusterName -GraphAccessToken $graphToken -ArmAccessToken $armToken -AccountId $id -ResourceName $ClusterName -ResourceGroupName $ResourceGroupName
+        }else{
+            Register-AzStackHCI -Region $Region -SubscriptionID $subscriptionID -ComputerName  $ClusterName -GraphAccessToken $graphToken -ArmAccessToken $armToken -AccountId $id -ResourceName $ClusterName
+        }
     #validate registration status
         #grab available commands for registration
         Invoke-Command -ComputerName $ClusterName -ScriptBlock {Get-Command -Module AzureStackHCI}
@@ -983,7 +1005,59 @@
     #>
 #endregion
 
-#region Create some VMs (3 per each CSV disk) https://github.com/Microsoft/WSLab/tree/master/Scenarios/S2D%20and%20Bulk%20VM%20creation
+#region Configure thin provisioned volumes as default if available
+    $OSInfo=Invoke-Command -ComputerName $ClusterName -ScriptBlock {
+        Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\'
+    }
+    if ($OSInfo.productname -eq "Azure Stack HCI" -and $OSInfo.CurrentBuild -ge 20348){
+        Get-StoragePool -CimSession $ClusterName -FriendlyName S2D* | Set-StoragePool -ProvisioningTypeDefault Thin
+    }
+#endregion
+
+#region (optional - just an example) Create Volumes to use max capacity. It also depends what mix of devices you have https://github.com/Microsoft/MSLab/tree/master/Scenarios/S2D%20and%20Volumes%20deep%20dive
+
+    #calculate reserve
+    $pool=Get-StoragePool -CimSession $clustername -FriendlyName s2D*
+    $HDDCapacity= ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq HDD | Measure-Object -Property Size -Sum).Sum
+    $HDDMaxSize=  ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq HDD | Measure-Object -Property Size -Maximum).Maximum
+    $SSDCapacity= ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq SSD | where-object usage -ne journal | Measure-Object -Property Size -Sum).Sum
+    $SSDMaxSize=  ($pool |Get-PhysicalDisk -CimSession $clustername | where-object mediatype -eq SSD | where-object usage -ne journal | Measure-Object -Property Size -Maximum).Maximum
+
+    $numberofNodes=(Get-ClusterNode -Cluster $clustername).count
+    if ($numberofNodes -eq 2){
+        if ($SSDCapacity){
+        $SSDCapacityToUse=$SSDCapacity-($numberofNodes*$SSDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
+        $sizeofvolumeonSSDs=$SSDCapacityToUse/2/$numberofNodes
+        }
+        if ($HDDCapacity){
+        $HDDCapacityToUse=$HDDCapacity-($numberofNodes*$HDDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
+        $sizeofvolumeonHDDs=$HDDCapacityToUse/2/$numberofNodes
+        }
+    }else{
+        if ($SSDCapacity){
+        $SSDCapacityToUse=$SSDCapacity-($numberofNodes*$SSDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
+        $sizeofvolumeonSSDs=$SSDCapacityToUse/3/$numberofNodes
+        }
+        if ($HDDCapacity){
+        $HDDCapacityToUse=$HDDCapacity-($numberofNodes*$HDDMaxSize)-100GB #100GB just some reserve (16*3 = perfhistory)+some spare capacity
+        $sizeofvolumeonHDDs=$HDDCapacityToUse/3/$numberofNodes
+        }
+    }
+
+    #create volumes
+    1..$numberofNodes | ForEach-Object {
+        if ($sizeofvolumeonHDDs){
+            New-Volume -CimSession $ClusterName -FileSystem CSVFS_ReFS -StoragePoolFriendlyName S2D* -Size $sizeofvolumeonHDDs -FriendlyName "MyVolumeonHDDs$_" -MediaType HDD
+        }
+        if ($sizeofvolumeonSSDs){
+            New-Volume -CimSession $ClusterName -FileSystem CSVFS_ReFS -StoragePoolFriendlyName S2D* -Size $sizeofvolumeonSSDs -FriendlyName "MyVolumeonSSDs$_" -MediaType SSD   
+        }
+    }
+
+    start-sleep 10
+#endregion
+
+#region (optional - just an example) Create some VMs (3 per each CSV disk) https://github.com/Microsoft/WSLab/tree/master/Scenarios/S2D%20and%20Bulk%20VM%20creation
     Start-Sleep -Seconds 60 #just to a bit wait as I saw sometimes that first VMs fails to create
     if ($realVMs -and $VHDPath){
         $CSVs=(Get-ClusterSharedVolume -Cluster $ClusterName).Name
@@ -1041,6 +1115,7 @@
     Import-Certificate -FilePath $env:TEMP\WACCert.cer -CertStoreLocation Cert:\LocalMachine\Root\
 
     #Configure Resource-Based constrained delegation
+    Install-WindowsFeature -Name RSAT-AD-PowerShell
     $gatewayObject = Get-ADComputer -Identity $GatewayServerName
     $computers = (Get-ADComputer -Filter {OperatingSystem -eq "Azure Stack HCI"}).Name
 
@@ -1049,11 +1124,46 @@
         Set-ADComputer -Identity $computerObject -PrincipalsAllowedToDelegateToAccount $gatewayObject
     }
 
-    ##Install Edge
-    Start-BitsTransfer -Source "https://aka.ms/edge-msi" -Destination "$env:USERPROFILE\Downloads\MicrosoftEdgeEnterpriseX64.msi"
-    #start install
-    Start-Process -Wait -Filepath msiexec.exe -Argumentlist "/i $env:UserProfile\Downloads\MicrosoftEdgeEnterpriseX64.msi /q"
-    #start Edge
-    start-sleep 5
-    & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    #update installed extensions
+    #https://docs.microsoft.com/en-us/windows-server/manage/windows-admin-center/configure/use-powershell
+        #Copy Posh Modules from wacgw
+        $Session=New-PSSession -ComputerName $GatewayServerName
+        Copy-Item -Path "C:\Program Files\Windows Admin Center\PowerShell\" -Destination "C:\Program Files\Windows Admin Center\PowerShell\" -Recurse -FromSession $Session
+        $Session | Remove-PSSession
+
+        #Import Posh Modules
+        $Items=Get-ChildItem -Path "C:\Program Files\Windows Admin Center\PowerShell\Modules" -Recurse | Where-Object Extension -eq ".psm1"
+        foreach ($Item in $Items){
+            Import-Module $Item.fullName
+        }
+
+        #list commands
+        Get-Command -Module ExtensionTools
+
+        #grab installed extensions 
+        $InstalledExtensions=Get-Extension -GatewayEndpoint https://$GatewayServerName  | Where-Object status -eq Installed
+        $ExtensionsToUpdate=$InstalledExtensions | Where-Object IsLatestVersion -eq $False
+
+        foreach ($Extension in $ExtensionsToUpdate){
+            Update-Extension -GatewayEndpoint https://$GatewayServerName -ExtensionId $Extension.ID
+        }
+
+    #Install OpenManage extension and increase MaxEvenlope size
+        if ($DellHW){
+            Install-Extension -GatewayEndpoint https://$GatewayServerName -ExtensionId dell-emc.openmanage-integration
+            Invoke-Command -ComputerName $Servers -ScriptBlock {
+                Set-Item -Path WSMan:\localhost\MaxEnvelopeSizekb -Value 4096
+            }
+        }
+
+    #Install Edge if not available on system
+    if (-not (test-path "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")){
+        Start-BitsTransfer -Source "https://aka.ms/edge-msi" -Destination "$env:USERPROFILE\Downloads\MicrosoftEdgeEnterpriseX64.msi"
+        #start install
+        Start-Process -Wait -Filepath msiexec.exe -Argumentlist "/i $env:UserProfile\Downloads\MicrosoftEdgeEnterpriseX64.msi /q"
+        #start Edge
+        start-sleep 5
+        & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    }
+
 #endregion

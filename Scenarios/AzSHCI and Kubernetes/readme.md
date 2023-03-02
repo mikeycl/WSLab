@@ -1,8 +1,8 @@
 # AzSHCI and Kubernetes
 
-## About the lab
+**Note: I updated scenario.ps1 several times, so following text is outdated (JaromirK)**
 
-Note: I updated scenario.ps1 several times, so readme.md might be bit outdated (JaromirK)
+## About the lab
 
 In following lab you will deploy Azure Kubernetes Service into Azure Stack HCI cluster. There are currently two options. From PowerShell and from Windows Admin Center. Windows Admin Center can be installed on Windows 10 or on Windows Server in Gateway mode.
 
@@ -21,16 +21,19 @@ https://aka.ms/AKSonHCI-Docs
 Note: please download latest [WSLab](https://aka.ms/wslab/download) as there is new VMProcessorCount value Max, that will configure maximum available LP to VMs.
 
 ```PowerShell
-$LabConfig=@{ DomainAdminName='LabAdmin'; AdminPassword='LS1setup!' ; <#Prefix = 'WSLab-'#> ; DCEdition='4'; Internet=$true ; TelemetryLevel='Full' ; TelemetryNickname='' ; AdditionalNetworksConfig=@(); VMs=@()}
+$LabConfig=@{ManagementSubnetIDs=0..1 ; DomainAdminName='LabAdmin'; AdminPassword='LS1setup!' ; Prefix = 'MSLab-' ; DCEdition='4'; Internet=$true ; TelemetryLevel='Full' ; TelemetryNickname='' ; AdditionalNetworksConfig=@(); VMs=@()}
 
 #2 nodes for AzSHCI Cluster
-1..2 | ForEach-Object {$VMNames="AzSHCI" ; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'AzSHCI20H2_G2.vhdx' ; HDDNumber = 4 ; HDDSize= 4TB ; MemoryStartupBytes= 24GB; VMProcessorCount="Max" ; NestedVirt=$true}}
+1..2 | ForEach-Object {$VMNames="AksHCI" ; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'AzSHCI21H2_G2.vhdx' ; HDDNumber = 4 ; HDDSize= 4TB ; MemoryStartupBytes= 24GB; VMProcessorCount="Max" ; NestedVirt=$true ; VirtualTPM=$true}}
 
-#Windows 10 management machine (for Windows Admin Center)
-$LabConfig.VMs += @{ VMName = 'Win10'; ParentVHD = 'Win1020H1_G2.vhdx' ; AddToolsVHD = $True ; MGMTNICs=1 }
+#or 2 nodes for Windows Server 2022
+#1..2 | ForEach-Object {$VMNames="AksHCI" ; $LABConfig.VMs += @{ VMName = "$VMNames$_" ; Configuration = 'S2D' ; ParentVHD = 'Win2022Core_G2.vhdx' ; HDDNumber = 4 ; HDDSize= 4TB ; MemoryStartupBytes= 24GB; VMProcessorCount="Max" ; NestedVirt=$true ; VirtualTPM=$true}}
 
 #Windows Admin Center gateway
-#$LabConfig.VMs += @{ VMName = 'WACGW' ; ParentVHD = 'Win2019Core_G2.vhdx' ; MGMTNICs=1 }
+#$LabConfig.VMs += @{ VMName = 'WACGW' ; ParentVHD = 'Win2022Core_G2.vhdx' ; MGMTNICs=1 }
+
+#Management machine
+$LabConfig.VMs += @{ VMName = 'Management' ; ParentVHD = 'Win2022_G2.vhdx' ; MGMTNICs=1 }
  
 ```
 
@@ -38,7 +41,7 @@ $LabConfig.VMs += @{ VMName = 'Win10'; ParentVHD = 'Win1020H1_G2.vhdx' ; AddTool
 
 ## The lab
 
-Run all code from DC. Follow [Scenario.ps1](/Scenarios/AzSHCI%20and%20Kubernetes/Scenario.ps1). Region Windows Admin Center on Win10 you should run from Win10 virtual machine.
+Run all code from Management Machine. Follow [Scenario.ps1](/Scenarios/AzSHCI%20and%20Kubernetes/Scenario.ps1).
 
 ![](/Scenarios/AzSHCI%20and%20Kubernetes/Screenshots/PowerShell_ISE01.png)
 

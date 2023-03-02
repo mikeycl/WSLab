@@ -47,7 +47,7 @@
             foreach ($ClusterNode in $ClusterNodes){
                 Install-WindowsFeature -Name RSAT-Clustering-PowerShell -ComputerName $ClusterNode
             }
-        Add-CauClusterRole -ClusterName $ClusterName -MaxFailedNodes 0 -RequireAllNodesOnline -EnableFirewallRules -VirtualComputerObjectName $CAURoleName -Force -CauPluginName Microsoft.WindowsUpdatePlugin -MaxRetriesPerNode 3 -CauPluginArguments @{ 'IncludeRecommendedUpdates' = 'False' } -StartDate "3/2/2017 3:00:00 AM" -DaysOfWeek 4 -WeeksOfMonth @(3) -verbose
+        Add-CauClusterRole -ClusterName $ClusterName -MaxFailedNodes 0 -RequireAllNodesOnline -EnableFirewallRules -GroupName $CAURoleName -VirtualComputerObjectName $CAURoleName -Force -CauPluginName Microsoft.WindowsUpdatePlugin -MaxRetriesPerNode 3 -CauPluginArguments @{ 'IncludeRecommendedUpdates' = 'False' } -StartDate "3/2/2017 3:00:00 AM" -DaysOfWeek 4 -WeeksOfMonth @(3) -verbose
         #>
 
     #enable S2D
@@ -296,10 +296,10 @@
     $ClusterName="Arc-Cluster"
 
     #register cluster to Azure
-        #download Azure module
+        #download Azure module (intentionally download "broken" version to demo troubleshooting)
         Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
         if (!(Get-InstalledModule -Name Az.StackHCI -ErrorAction Ignore)){
-            Install-Module -Name Az.StackHCI -Force
+            Install-Module -Name Az.StackHCI -Force -RequiredVersion "1.0.0"
         }
 
         #login to azure
@@ -504,9 +504,9 @@
         #create password
         $start = Get-Date
         $end = $start.AddYears(300)
-        $pw = Retry-Command -ScriptBlock { New-AzureADServicePrincipalPasswordCredential -ObjectId $sp.ObjectId -StartDate $start -EndDate $end }
+        $pw = New-AzureADServicePrincipalPasswordCredential -ObjectId $sp.ObjectId -StartDate $start -EndDate $end
         
-        $Region=(Get-AzLocation | Where-Object Providers -Contains "Microsoft.AzureStackHCI" | Out-GridView -Title "Please select Location").Location
+        $Region=(Get-AzLocation | Where-Object Providers -Contains "Microsoft.AzureStackHCI" | Out-GridView -Title "Please select Location" -OutputMode Single).Location
         $ResourceGroupName="AzureStackHCIClusters"
         
         $ArcRegistrationParams = @{
@@ -1075,7 +1075,7 @@
                 foreach ($ClusterNode in $ClusterNodes){
                     Install-WindowsFeature -Name RSAT-Clustering-PowerShell -ComputerName $ClusterNode
                 }
-            Add-CauClusterRole -ClusterName $ClusterName -MaxFailedNodes 0 -RequireAllNodesOnline -EnableFirewallRules -VirtualComputerObjectName $CAURoleName -Force -CauPluginName Microsoft.WindowsUpdatePlugin -MaxRetriesPerNode 3 -CauPluginArguments @{ 'IncludeRecommendedUpdates' = 'False' } -StartDate "3/2/2017 3:00:00 AM" -DaysOfWeek 4 -WeeksOfMonth @(3) -verbose
+            Add-CauClusterRole -ClusterName $ClusterName -MaxFailedNodes 0 -RequireAllNodesOnline -EnableFirewallRules -GroupName $CAURoleName -VirtualComputerObjectName $CAURoleName -Force -CauPluginName Microsoft.WindowsUpdatePlugin -MaxRetriesPerNode 3 -CauPluginArguments @{ 'IncludeRecommendedUpdates' = 'False' } -StartDate "3/2/2017 3:00:00 AM" -DaysOfWeek 4 -WeeksOfMonth @(3) -verbose
 
         #enable S2D
             Enable-ClusterS2D -CimSession $ClusterName -confirm:0 -Verbose

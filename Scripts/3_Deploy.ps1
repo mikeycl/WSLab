@@ -398,6 +398,128 @@ If (-not $isAdmin) {
         }
     }
 
+    function New-LinuxVM {
+        [cmdletbinding()]
+        param(
+            [PSObject]$VMConfig,
+            [PSObject]$LabConfig,
+            [string]$LabFolder
+        )
+        WriteInfoHighlighted "Creating VM $($VMConfig.VMName)"
+        WriteInfo "`t Looking for Parent Disk"
+        $serverparent = Get-ChildItem "$PSScriptRoot\ParentDisks\" -Recurse | Where-Object Name -eq $VMConfig.ParentVHD
+        
+        if ($serverparent -eq $null) {
+            WriteErrorAndExit "Server parent disk $($VMConfig.ParentVHD) not found."
+        }else{
+            WriteInfo "`t`t Server parent disk $($serverparent.Name) found"
+        }
+
+        $VMname=$Labconfig.Prefix+$VMConfig.VMName
+        if ($serverparent.Extension -eq ".vhdx"){
+            $vhdpath="$LabFolder\VMs\$VMname\Virtual Hard Disks\$VMname.vhdx"
+        }elseif($serverparent.Extension -eq ".vhd"){
+            $vhdpath="$LabFolder\VMs\$VMname\Virtual Hard Disks\$VMname.vhd"
+        }
+        WriteInfo "`t Creating OS VHD"
+        New-VHD -ParentPath $serverparent.fullname -Path $vhdpath
+    
+        $VMTemp = New-VM -Path "$LabFolder\VMs" -Name $VMname -Generation 2 -MemoryStartupBytes $VMConfig.MemoryStartupBytes -SwitchName $SwitchName  -VHDPath $vhdPath
+
+        #Set dynamic memory
+        if ($VMConfig.StaticMemory -eq $false){
+            WriteInfo "`t Configuring DynamicMemory"
+            $VMTemp | Set-VMMemory -DynamicMemoryEnabled $true
+        } else {
+            $VMTemp | Set-VMMemory -DynamicMemoryEnabled $false
+        }
+
+        $VMTemp | Get-VMNetworkAdapter | Rename-VMNetworkAdapter -NewName Management1
+        if ($VMTemp.AutomaticCheckpointsEnabled -eq $True){
+            $VMTemp | Set-VM -AutomaticCheckpointsEnabled $False
+        }
+        $VMTemp | Set-VMFirmware -EnableSecureBoot Off
+    
+        # only Debian Buster supports Secure Boot
+        #$vm | Set-VMFirmware -EnableSecureBoot On -SecureBootTemplateId "272e7447-90a4-4563-a4b9-8e4ab00526ce" # -SecureBootTemplate MicrosoftUEFICertificateAuthority
+   
+        Start-VM $VMTemp
+
+        # wait for the IP address
+        Write-Host "`t Waiting for network connectivity to the VM..." -NoNewLine
+        $count = 0
+        do { 
+            $ip = $VMTemp | Get-VMNetworkAdapter | Select-Object -ExpandProperty IPAddresses
+            Start-Sleep -Seconds 1
+
+            Write-Host -ForegroundColor Gray -NoNewline "."
+            $count += 1
+        } while (-not $ip -and $count -le 60)
+
+        if(-not $ip) {
+            WriteErrorAndExit "Unable to detect IP for a VM $vmName"
+        } else {
+            WriteInfo "OK"
+        }
+
+        $sshKeyPath = $LabConfig.SshKeyPath
+        if(-not $sshKeyPath) {
+            $sshKeyPath = "$LabFolder\.ssh\lab_rsa"
+        }
+        if(-not (Test-Path $sshKeyPath)) {
+            WriteErrorAndExit "`t Cannot find SSH key $sshKeyPath."
+        }
+
+        if($LabConfig.LinuxAdminName) {
+            $username = $LabConfig.LinuxAdminName
+        } else {
+            $username = $LabConfig.DomainAdminName
+        }
+        $username = $username.ToLower()
+
+        # set the hostname
+        WriteInfo "`t Configuring guest OS hostname..."
+        hvc ssh -oLogLevel=ERROR -oStrictHostKeyChecking=no -i $sshKeyPath "$username@$vmName" "echo '$($LabConfig.AdminPassword)' | sudo -p '' -S sh -c 'sed -i `"s/```hostname```/$($VMConfig.VMName)/g`" /etc/hosts; hostnamectl set-hostname `"$($VMConfig.VMName)`" > /etc/hostname;'"
+
+        $linuxCommandsToExecute = ""
+        if(-not $VMConfig.LinuxDomainJoin -or $VMConfig.LinuxDomainJoin.ToLower() -eq "sssd") {
+            WriteInfo "`t Creating AD Computer object..."
+            Invoke-Command -VMGuid $DC.id -Credential $cred -ArgumentList $VMConfig.VMName,$path,$Labconfig -ScriptBlock {
+                param($Name,$path,$Labconfig); 
+
+                New-ADComputer -Name $Name -Path "OU=$($Labconfig.DefaultOUName),$($Labconfig.DN)"
+                $password = ConvertTo-SecureString -String $Name -AsPlainText -Force
+                Get-ADComputer -Identity $Name | Set-ADAccountPassword -NewPassword:$password -Reset:$true
+            } 
+
+            WriteInfo "`t Joining to AD..."
+            $upn = ("$(($LabConfig.DomainAdminName).ToLower())@$($LabConfig.DomainName)")
+            $linuxCommandsToExecute = "realm join --one-time-password $($VMConfig.VMName) $($LabConfig.DomainName); mkdir -p /home/$($upn)/.ssh/; chown $upn /home/$upn/; cp /home/$username/.ssh/authorized_keys /home/$upn/.ssh/authorized_keys; sed -i -E `"`"s/use_fully_qualified_names = .+/use_fully_qualified_names = False/g`"`" /etc/sssd/sssd.conf;"
+            hvc ssh -oLogLevel=ERROR -oStrictHostKeyChecking=no -i $sshKeyPath "$username@$vmName" "echo '$($LabConfig.AdminPassword)' | sudo -p '' -S sh -c '$linuxCommandsToExecute'"
+        }
+
+        WriteInfo "`t Shutting down VM..."
+        hvc ssh -oLogLevel=ERROR -oStrictHostKeyChecking=no -i $sshKeyPath "$username@$vmName" "echo '$($LabConfig.AdminPassword)' | sudo -p '' -S sh -c 'poweroff'"
+
+        # Wait for vm to shut down
+        $count = 0
+        do { 
+            $vm = $VMTemp | Get-VM
+            Start-Sleep -Seconds 1
+            $count += 1
+        } while ($vm.State -ne "Off" -and $count -le 60)
+        
+        if($vm.State -ne "Off") {
+            $VMTemp | Stop-VM
+        }
+
+        # return info
+        [PSCustomObject]@{
+            OSDiskPath = $vhdpath
+            VM = $VMTemp
+        }
+    }
+
     Function BuildVM {
         [cmdletbinding()]
         param(
@@ -474,6 +596,34 @@ If (-not $isAdmin) {
             $global:IP++
         }
 
+        if($VMConfig.AdditionalNetworkAdapters) {
+            $networks = $VMConfig.AdditionalNetworkAdapters
+            if($networks -isnot [array]) {
+                $networks = @($networks)
+            }
+
+            foreach ($network in $networks) {
+                $switch = Get-VMSwitch -Name $network.VirtualSwitchName -ErrorAction SilentlyContinue
+                if(-not $switch) {
+                    WriteErrorAndExit "Hyper-V switch $($network.VirtualSwitchName) not found."
+                }
+
+                $adapter = $vmtemp | Add-VMNetworkAdapter -SwitchName $network.VirtualSwitchName -Passthru
+
+                if($network.Mac -and $network.Mac -match "^([0-9A-F][0-9A-F]-){5}[0-9A-F][0-9A-F]$") {
+                    $adapter | Set-VMNetworkAdapter -StaticMacAddress $network.Mac
+                }
+
+                if($network.VlanId -and $network.VlanId -ne 0) {
+                    $adapter | Set-VMNetworkAdapterVlan -VlanId $network.VlanId -Access
+                }
+
+                if($network.IpConfiguration -and $network.IpConfiguration -ne "DHCP" -and $network.IpConfiguration -is [Hashtable]) {
+                    $adapter | Set-VMNetworkConfiguration -IPAddress $network.IpConfiguration.IpAddress -Subnet $network.IpConfiguration.Subnet
+                }
+            }
+        }
+
         #Generate DSC Config
         if ($VMConfig.DSCMode -eq 'Pull'){
             WriteInfo "`t Setting DSC Mode to Pull"
@@ -539,6 +689,12 @@ If (-not $isAdmin) {
             $VMTemp | Set-VMProcessor -Count 2
         }
 
+        #Disable Time Integration Components
+        If ($VMConfig.DisableTimeIC){
+            WriteInfo  "`t`t Disabling Time Synchronization Integration Service"
+            $VMTemp | Disable-VMIntegrationService -Name "Time Synchronization"
+        }
+
         $Name=$VMConfig.VMName
         #add run synchronous commands
         WriteInfo "`t Adding Sync Commands"
@@ -598,13 +754,26 @@ If (-not $isAdmin) {
         }
         #configure native VLAN and AllowedVLANs
         WriteInfo "`t Configuring NativeVLAN and AllowedVLANs"
+        if ($ManagementSubnetIDs){
+            $number1=$(($HighestVLAN+1))
+            $number2=$($HighestVLAN+$($ManagementSubnetIDs.Count))
+            if ($number1 -eq $number2){
+                $number=$number1
+            }else{
+                $number="$number1-$number2"
+            }
+            $AllowedVLANs="$($LabConfig.AllowedVLANs),$number"
+        }else{
+            $AllowedVLANs=$($LabConfig.AllowedVLANs)
+        }
+
         if ($VMConfig.ManagementSubnetID -gt 0){
             $NativeVlanId=($HighestVLAN+$VMConfig.ManagementSubnetID)
             WriteInfo "`t`t Subnet ID is $($VMConfig.ManagementSubnetID) with NativeVLAN $NativeVLanID. AllowedVLANIDList is $($LabConfig.AllowedVLANs),$NativeVLANID"
-            $VMTemp | Set-VMNetworkAdapterVlan -VMNetworkAdapterName "Management*" -Trunk -NativeVlanId $NativeVlanId -AllowedVlanIdList "$($LabConfig.AllowedVLANs),$NativeVLANID"
+            $VMTemp | Set-VMNetworkAdapterVlan -VMNetworkAdapterName "Management*" -Trunk -NativeVlanId $NativeVlanId -AllowedVlanIdList "$AllowedVLANs"
         }else{
             WriteInfo "`t`t Subnet ID is 0 with NativeVLAN 0. AllowedVlanIDList is $($LabConfig.AllowedVLANs)"
-            $VMTemp | Set-VMNetworkAdapterVlan -VMNetworkAdapterName "Management*" -Trunk -NativeVlanId 0 -AllowedVlanIdList "$($LabConfig.AllowedVLANs)"
+            $VMTemp | Set-VMNetworkAdapterVlan -VMNetworkAdapterName "Management*" -Trunk -NativeVlanId 0 -AllowedVlanIdList "$AllowedVLANs"
         }
 
         #Create Unattend file
@@ -756,8 +925,10 @@ If (-not $isAdmin) {
     [int]$HighestVLAN=$LabConfig.AllowedVLANs -split "," -split "-" | Select  -Last 1
 
     #Grab defined Management Subnet IDs and ignore 0
-    $ManagementSubnetIDs=$labconfig.vms.ManagementSubnetID | Select-Object -Unique | Sort-Object | Where-Object {$_ -ne 0}
-    WriteInfo "`t Requested ManagementSubnetIDs: $ManagementSubnetIDs"
+    $ManagementSubnetIDs=$labconfig.vms.ManagementSubnetID + $LabConfig.ManagementSubnetIDs | Select-Object -Unique | Sort-Object | Where-Object {$_ -ne 0}
+    if ($ManagementSubnetIDs){
+        WriteInfo "`t Requested ManagementSubnetIDs: $ManagementSubnetIDs"
+    }
 
 #endregion
 
@@ -931,7 +1102,8 @@ If (-not $isAdmin) {
             }
 
             WriteInfo "`t Detecting default vSwitch"
-            $DefaultSwitch=Get-VMSwitch -ID c08cb7b8-9b3c-408e-8e30-5e16a3aeb444 -ErrorAction Ignore
+            #$DefaultSwitch=Get-VMSwitch -ID c08cb7b8-9b3c-408e-8e30-5e16a3aeb444 -ErrorAction Ignore
+            $DefaultSwitch=Get-VMSwitch -Name "Default Switch" -ErrorAction Ignore
             if ($DefaultSwitch){WriteInfo "`t Default switch detected"}
 
             #if running in Azure and default switch is not present, create InternalNAT Switch
@@ -1299,7 +1471,7 @@ If (-not $isAdmin) {
             Foreach ($number in $using:ManagementSubnetIDs){
                 $IP="10.0.$number.1"
                 $AdapterName="Subnet$Number"
-                $NetAdapterName=(Get-NetAdapterAdvancedProperty | where displayvalue -eq $AdapterName).Name
+                $NetAdapterName=(Get-NetAdapterAdvancedProperty | Where-Object displayvalue -eq $AdapterName).Name
                 if (Get-NetIPAddress -InterfaceAlias $NetAdapterName -IPAddress $IP -ErrorAction Ignore){
                     Write-Output "`t`t Subnet $AdapterName already configured"
                 }else{
@@ -1308,9 +1480,6 @@ If (-not $isAdmin) {
                     #add dhcp scope
                     Write-Output "`t`t Adding DHCP Scope ID 10.0.$number.0 and it's DHCP options"
                     Add-DhcpServerv4Scope -StartRange "10.0.$number.10" -EndRange "10.0.$number.254" -Name "Scope$number" -State Active -SubnetMask 255.255.255.0
-                    Set-DhcpServerv4OptionValue -OptionId 6 -Value "10.0.0.1" -ScopeId "10.0.$number.0"
-                    Set-DhcpServerv4OptionValue -OptionId 3 -Value "10.0.1.1" -ScopeId "10.0.$number.0"
-                    Set-DhcpServerv4OptionValue -OptionId 15 -Value "$($using:Labconfig.DomainName)" -ScopeId "10.0.$number.0"
                 }
             }
             #make sure RRAS features are installed
@@ -1325,6 +1494,13 @@ If (-not $isAdmin) {
             #restart routing... just to make sure
             Write-Output "`t`t  Restarting service RemoteAccess"
             Restart-Service RemoteAccess
+
+            #configure DHCP Options
+            Foreach ($number in $using:ManagementSubnetIDs){
+                Set-DhcpServerv4OptionValue -OptionId 6 -Value "10.0.$number.1" -ScopeId "10.0.$number.0"
+                Set-DhcpServerv4OptionValue -OptionId 3 -Value "10.0.$number.1" -ScopeId "10.0.$number.0"
+                Set-DhcpServerv4OptionValue -OptionId 15 -Value "$($using:Labconfig.DomainName)" -ScopeId "10.0.$number.0"
+            }
         }
     }
 
@@ -1435,6 +1611,11 @@ If (-not $isAdmin) {
                             }
                     }
 
+                #create Linux VM
+                    if ($VMConfig.configuration -eq 'Linux'){
+                        $createdVm = New-LinuxVM -VMConfig $($VMConfig) -LabConfig $labconfig -LabFolder $LABfolder
+                    }
+
                 #create VM with Simple configuration
                     if ($VMConfig.configuration -eq 'Simple'){
                         $createdVm = BuildVM -VMConfig $($VMConfig) -LabConfig $labconfig -LabFolder $LABfolder
@@ -1509,7 +1690,7 @@ If (-not $isAdmin) {
                         'vm.configuration' = $VMConfig.Configuration
                         'vm.unattend' = $VMConfig.Unattend
                     }
-                    if(Test-Path -Path $createdVm.OSDiskPath) {
+                    if((Test-Path -Path $createdVm.OSDiskPath) -and $VMConfig.configuration -ne "Linux") {
                         $osInfo = Get-WindowsImage -ImagePath $createdVm.OSDiskPath -Index 1
                         
                         $properties.'vm.os.installationType' = $osInfo.InstallationType
@@ -1627,11 +1808,13 @@ If (-not $isAdmin) {
         Send-TelemetryEvents -Events $vmDeploymentEvents | Out-Null
     }
 
-    #write how much it took to deploy
-        WriteInfo "Script finished at $CheckPointTime and took $(($CheckPointTime - $StartDateTime).TotalMinutes) Minutes"
+#write how much it took to deploy
+WriteInfo "Script finished at $CheckPointTime and took $(($CheckPointTime - $StartDateTime).TotalMinutes) Minutes"
 
-    Stop-Transcript
+Stop-Transcript
 
-    WriteSuccess "Press enter to continue ..."
+If (!$LabConfig.AutoClosePSWindows) {
+    WriteSuccess "Press enter to continue..."
     Read-Host | Out-Null
+}
 #endregion
