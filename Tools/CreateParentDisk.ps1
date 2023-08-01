@@ -39,14 +39,21 @@ If (-not $isAdmin) {
 
     #endregion
 
-    #region download convert-windowsimage if needed and load it
+    $mslabVersion = "dev"
 
-    if (!(Test-Path "$PSScriptRoot\Convert-WindowsImage.ps1")){
+    #region download convert-windowsimage if needed and load it
+    $convertWindowsImagePath = "$PSScriptRoot\Convert-WindowsImage.ps1"
+    if (-not (Test-Path -Path $convertWindowsImagePath)) {
         WriteInfo "`t Downloading Convert-WindowsImage"
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/microsoft/MSLab/master/Tools/Convert-WindowsImage.ps1" -OutFile "$PSScriptRoot\Convert-WindowsImage.ps1"
+            Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/microsoft/MSLab/releases/download/$mslabVersion/Convert-WindowsImage.ps1" -OutFile $convertWindowsImagePath
         } catch {
-            WriteErrorAndExit "`t Failed to download Convert-WindowsImage.ps1!"
+            try {
+                WriteInfo "Download Convert-windowsimage.ps1 from releases ($mslabVersion) failed with $($_.Exception.Message), trying master branch now"
+                Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/microsoft/MSLab/master/Tools/Convert-WindowsImage.ps1" -OutFile $convertWindowsImagePath
+            } catch {
+                WriteError "`t Failed to download Convert-WindowsImage.ps1!"
+            }
         }
     }
 
@@ -161,11 +168,14 @@ If (-not $isAdmin) {
                     20348 {
                         "AzSHCI21H2_G2.vhdx"
                     }
-                    22621 {
+                    20349 {
                         "AzSHCI22H2_G2.vhdx"
                     }
+                    25398 {
+                        "AzSHCI23H2_G2.vhdx"
+                    }
                 }
-                if ($BuildNumber -GT 20348){
+                if ($BuildNumber -GT 25398){
                     $tempvhdname="AzSHCIInsider_$BuildNumber.vhdx"
                 }
             }elseif (($Edition -like "*Server*Core*") -or ($Edition -like "Windows Server * Datacenter") -or ($Edition -like "Windows Server * Standard")){
@@ -314,9 +324,9 @@ If (-not $isAdmin) {
         if(!$vhdname){$vhdname=$tempvhdname}
         
         #ask for size
-        [int64]$size=(Read-Host -Prompt "Please type size of the Image in GB. If nothing specified, 60 is used")
+        [int64]$size=(Read-Host -Prompt "Please type size of the Image in GB. If nothing specified, 127 is used")
         $size=$size*1GB
-        if (!$size){$size=60GB}
+        if (!$size){$size=127GB}
         
         #Create VHD
         if ($nanoserver -eq "y"){

@@ -171,7 +171,9 @@
         }
     }
     #define and install other features
-    $features="Failover-Clustering","RSAT-Clustering-PowerShell","Hyper-V-PowerShell","NetworkATC","NetworkHUD","Data-Center-Bridging","RSAT-DataCenterBridging-LLDP-Tools","FS-SMBBW","Bitlocker","RSAT-Feature-Tools-BitLocker","Storage-Replica","RSAT-Storage-Replica","FS-Data-Deduplication","System-Insights","RSAT-System-Insights"
+    $features="Failover-Clustering","RSAT-Clustering-PowerShell","Hyper-V-PowerShell","NetworkATC","NetworkHUD","Data-Center-Bridging","RSAT-DataCenterBridging-LLDP-Tools","FS-SMBBW","System-Insights","RSAT-System-Insights"
+    #optional - affects perf even if not enabled on volumes as filter driver is attached (SR,Dedup) and also Bitlocker, that affects a little bit
+    #$features+="Storage-Replica","RSAT-Storage-Replica","FS-Data-Deduplication","BitLocker","RSAT-Feature-Tools-BitLocker"
     Invoke-Command -ComputerName $servers -ScriptBlock {Install-WindowsFeature -Name $using:features}
 #endregion
 
@@ -209,7 +211,7 @@
     #Configure max evenlope size to be 8kb to be able to copy files using PSSession (useful for dell drivers update region and Windows Admin Center)
     Invoke-Command -ComputerName $servers -ScriptBlock {Set-Item -Path WSMan:\localhost\MaxEnvelopeSizekb -Value 8192}
 
-    #Configure MaxTimeout (10s for Dell hardware, 30s for Virtual environment https://learn.microsoft.com/en-us/windows-server/storage/storage-spaces/storage-spaces-direct-in-vm)
+    #Configure MaxTimeout (10s for Dell hardware - especially if you have HDDs, 30s for Virtual environment https://learn.microsoft.com/en-us/windows-server/storage/storage-spaces/storage-spaces-direct-in-vm)
     if ((Get-CimInstance -ClassName win32_computersystem -CimSession $servers[0]).Manufacturer -like "*Dell Inc."){
         Invoke-Command -ComputerName $servers -ScriptBlock {Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\spaceport\Parameters -Name HwTimeout -Value 0x00002710}
     }
@@ -225,13 +227,18 @@
         #Device Guard
         #REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "Locked" /t REG_DWORD /d 1 /f 
         REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "EnableVirtualizationBasedSecurity" /t REG_DWORD /d 1 /f
-        REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "RequirePlatformSecurityFeatures" /t REG_DWORD /d 3 /f
+        #there s different setting for VM and Bare metal
+        if ((Get-CimInstance -ClassName win32_computersystem).Model -eq "Virtual Machine"){
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "RequirePlatformSecurityFeatures" /t REG_DWORD /d 1 /f
+        }else{
+            REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "RequirePlatformSecurityFeatures" /t REG_DWORD /d 3 /f
+        }
         REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v "RequireMicrosoftSignedBootChain" /t REG_DWORD /d 1 /f
 
         #Cred Guard
         REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LsaCfgFlags" /t REG_DWORD /d 1 /f
 
-        #System Guard Secure Launch
+        #System Guard Secure Launch (bare meta only)
         #https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-system-guard/system-guard-secure-launch-and-smm-protection
         REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\SystemGuard" /v "Enabled" /t REG_DWORD /d 1 /f
 
@@ -633,7 +640,7 @@
         }
 
         #since ATC is not available on management machine, copy PowerShell module over to management machine from cluster. However global intents will not be automatically added as in C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NetworkATC\NetWorkATC.psm1 is being checked if NetATC feature is installed [FabricManager.FeatureStaging]::Feature_NetworkATC_IsEnabled()
-        $session=New-PSSession -ComputerName $ClusterName
+        $session=New-PSSession -ComputerName $Servers[0]
         $items="C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NetworkATC","C:\Windows\System32\NetworkAtc.Driver.dll","C:\Windows\System32\Newtonsoft.Json.dll","C:\Windows\System32\NetworkAtcFeatureStaging.dll"
         foreach ($item in $items){
             Copy-Item -FromSession $session -Path $item -Destination $item -Recurse -Force
@@ -651,7 +658,7 @@
             #grab fastest adapters names (assuming that we are deploying converged intent with just Mellanox or Intel E810)
             $FastestLinkSpeed=(get-netadapter -CimSession $Servers | Where-Object {$_.Status -eq "up" -and $_.HardwareInterface -eq $True}).Speed | Sort-Object -Descending | Select-Object -First 1
             #grab adapters
-            $AdapterNames=(Get-NetAdapter -CimSession $ClusterName | Where-Object {$_.Status -eq "up" -and $_.HardwareInterface -eq $True} | where-object Speed -eq $FastestLinkSpeed | Sort-Object Name).Name
+            $AdapterNames=(Get-NetAdapter -CimSession $Servers[0] | Where-Object {$_.Status -eq "up" -and $_.HardwareInterface -eq $True} | where-object Speed -eq $FastestLinkSpeed | Sort-Object Name).Name
             #$AdapterNames="SLOT 3 Port 1","SLOT 3 Port 2"
             Import-Module NetworkATC
             Add-NetIntent -ClusterName $ClusterName -Name ConvergedIntent -Management -Compute -Storage -AdapterName $AdapterNames -Verbose #-StorageVlans 1,2
@@ -746,6 +753,13 @@ if ($NetATC){
                     Set-NetAdapterAdvancedProperty -CimSession $Servers -InterfaceDescription Mellanox* -DisplayName 'Dcbxmode' -DisplayValue 'Host in charge'
                 }
             }
+            #configure larger receive buffers on Mellanox adapters
+            if ((Get-CimInstance -ClassName win32_computersystem -CimSession $servers[0]).Manufacturer -like "*Dell Inc."){
+                if (Get-NetAdapter -CimSession $Servers -InterfaceDescription Mellanox*){
+                    Set-NetAdapterAdvancedProperty -CimSession $Servers -InterfaceDescription Mellanox* -DisplayName 'Receive buffers' -DisplayValue '4096'
+                }
+            }
+
         #endregion
 
         #region Check settings before applying NetATC
@@ -809,6 +823,10 @@ if ($NetATC){
 
             #check number of live migrations
             get-vmhost -CimSession $Servers | Select-Object Name,MaximumVirtualMachineMigrations
+
+            #check it in cluster (is only 1 - expected)
+            get-cluster -Name $ClusterName | Select-Object Name,MaximumParallelMigrations
+
         #endregion
 
         #remove net intent global overrides if necessary
@@ -1066,7 +1084,9 @@ if ($numberofnodes -eq 16){
             Install-Module -Name Az.Resources -Force
         }
         #choose location for cluster (and RG)
-        $region=(Get-AzLocation | Where-Object Providers -Contains "Microsoft.AzureStackHCI" | Out-GridView -OutputMode Single -Title "Please select Location for AzureStackHCI metadata").Location
+        $region=(Get-AzResourceProvider -ProviderNamespace Microsoft.AzureStackHCI).Where{($_.ResourceTypes.ResourceTypeName -eq 'clusters' -and $_.RegistrationState -eq 'Registered')}.Locations | Out-GridView -OutputMode Single -Title "Please select Location for AzureStackHCI metadata"
+        $region = $region -replace '\s',''
+        $region = $region.ToLower()
         if ($ResourceGroupName){
             If (-not (Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction Ignore)){
                 New-AzResourceGroup -Name $ResourceGroupName -Location $region
@@ -1074,9 +1094,14 @@ if ($numberofnodes -eq 16){
         }
 
         #Register AzSHCI with prompting for creds
-        #Register-AzStackHCI -Region $Region -SubscriptionID $subscriptionID -ComputerName $ClusterName -UseDeviceAuthentication
+        if ($ResourceGroupName){
+            Register-AzStackHCI -Region $Region -SubscriptionID $subscriptionID -ComputerName $ClusterName -UseDeviceAuthentication -ResourceGroupName $ResourceGroupName
+        }else{
+            Register-AzStackHCI -Region $Region -SubscriptionID $subscriptionID -ComputerName $ClusterName -UseDeviceAuthentication
+        }
 
         #Register AZSHCi without prompting for creds again
+        <#
         $armTokenItemResource = "https://management.core.windows.net/"
         #$graphTokenItemResource = "https://graph.windows.net/"
         $azContext = Get-AzContext
@@ -1088,6 +1113,7 @@ if ($numberofnodes -eq 16){
         }else{
             Register-AzStackHCI -Region $Region -SubscriptionID $subscriptionID -ArmAccessToken $armToken -ComputerName $ClusterName -AccountId $id -ResourceName $ClusterName
         }
+        #>
 
     #validate registration status
         #grab available commands for registration
@@ -1159,6 +1185,53 @@ if ((Get-CimInstance -ClassName win32_computersystem -CimSession $Servers[0]).Ma
     }
     $Results | Select-Object "HostName","CurrentIPv4.1.Address","OS-BMC.1.UsbNicIpAddress","IPInsideOS","OS-BMC.1.AdminState"
 }
+#endregion
+
+#region (optional) install iDRAC Service Module (ism) https://www.dell.com/support/search/en-us#q=ism&sort=relevancy&f:langFacet=[en]
+    #note: ismrfutil is installed anyway as part of managing AzSHCI With Windows Admin Center
+    if ((Get-CimInstance -ClassName win32_computersystem -CimSession $Servers[0]).Manufacturer -like "*Dell*"){
+        #download and extract latest catalog
+            #Download catalog
+            Start-BitsTransfer -Source "https://downloads.dell.com/catalog/ASHCI-Catalog.xml.gz" -Destination "$env:UserProfile\Downloads\ASHCI-Catalog.xml.gz"
+            #unzip gzip to a folder https://scatteredcode.net/download-and-extract-gzip-tar-with-powershell/
+            Function Expand-GZipArchive{
+                Param(
+                    $infile,
+                    $outfile = ($infile -replace '\.gz$','')
+                    )
+                $input = New-Object System.IO.FileStream $inFile, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read)
+                $output = New-Object System.IO.FileStream $outFile, ([IO.FileMode]::Create), ([IO.FileAccess]::Write), ([IO.FileShare]::None)
+                $gzipStream = New-Object System.IO.Compression.GzipStream $input, ([IO.Compression.CompressionMode]::Decompress)
+                $buffer = New-Object byte[](1024)
+                while($true){
+                    $read = $gzipstream.Read($buffer, 0, 1024)
+                    if ($read -le 0){break}
+                    $output.Write($buffer, 0, $read)
+                    }
+                $gzipStream.Close()
+                $output.Close()
+                $input.Close()
+            }
+            Expand-GZipArchive "$env:UserProfile\Downloads\ASHCI-Catalog.xml.gz" "$env:UserProfile\Downloads\ASHCI-Catalog.xml"
+        #find binary in catalog
+            #load catalog
+            [xml]$XML=Get-Content "$env:UserProfile\Downloads\ASHCI-Catalog.xml"
+            $component=$xml.manifest.SoftwareComponent | Where-Object Path -Like *systems-management*
+            #find binary
+            $url="https://dl.dell.com/$($component.path)"
+            $filename=$url | Split-Path -Leaf
+        #download
+        Start-BitsTransfer -Source $url -Destination $env:USERPROFILE\Downloads\$filename
+        #copy ism to nodes and install
+        $Sessions=New-PSSession -ComputerName $Servers
+        foreach ($session in $sessions){
+            Copy-Item -Path $env:USERPROFILE\Downloads\$filename -Destination $env:USERPROFILE\Downloads\$filename -ToSession $Session
+        }
+        #install
+        Invoke-Command -ComputerName $Servers -ScriptBlock {
+            Start-Process -FilePath $env:USERPROFILE\Downloads\$using:FileName -ArgumentList "/s" -Wait
+        }
+    }
 #endregion
 
 #region (optional) Install Windows Admin Center Gateway https://github.com/microsoft/WSLab/tree/master/Scenarios/Windows%20Admin%20Center%20and%20Enterprise%20CA#gw-mode-installation-with-self-signed-cert
@@ -1240,17 +1313,9 @@ if ((Get-CimInstance -ClassName win32_computersystem -CimSession $Servers[0]).Ma
     }
     $ComputersInfo | Select-Object PSComputerName,ProductName,DisplayVersion,UBR
 
-    #check last driver update status
-    Invoke-Command -ComputerName $Servers -ScriptBlock {
-        #display result
-        $json=Get-Content "C:\ProgramData\Dell\DELL System Update\dell_dup\DSU_STATUS.json" | ConvertFrom-Json
-        $output=$json.SystemUpdateStatus.updateablecomponent #| Select-Object Name,Version,Baselineversion,UpdateStatus,RebootRequired
-        Return $output
-    } | Out-GridView
-
     #region check if there are any updates are needed
         $ScanResult=Invoke-Command -ComputerName $Servers -ScriptBlock {
-            & "C:\Program Files\Dell\DELL System Update\DSU.exe" --catalog-location="$using:DSUPackageDownloadFolder\ASHCI-Catalog.xml" --preview | Out-Null
+            & "C:\Program Files\Dell\DELL System Update\DSU.exe" --catalog-location="$env:UserProfile\Downloads\ASHCI-Catalog.xml" --preview | Out-Null
             $JSON=Get-content "C:\ProgramData\Dell\DELL System Update\dell_dup\DSU_STATUS.json" | ConvertFrom-JSon
             $Result=$JSON.systemupdatestatus.invokerinfo.statusmessage
             if ($Result -like "No Applicable Update*" ){
@@ -1292,22 +1357,7 @@ if ((Get-CimInstance -ClassName win32_computersystem -CimSession $Servers[0]).Ma
         $ScanResult
     #endregion
 
-    #check NetworkHUD event logs
-    $events=Invoke-Command -ComputerName $Servers -ScriptBlock {
-        Get-WinEvent -FilterHashtable @{"ProviderName"="Microsoft-Windows-Networking-NetworkHUD";StartTime=(get-date).AddMinutes(-15)}
-    }
-    $events | Format-Table -AutoSize
-
-    #check NetworkATC event logs
-    $events=Invoke-Command -ComputerName $Servers -ScriptBlock {
-        Get-WinEvent -FilterHashtable @{"ProviderName"="Microsoft-Windows-Networking-NetworkATC";StartTime=(get-date).AddMinutes(-15)}
-    }
-    $events | Format-Table -AutoSize
-
-    #Check cluster networks
-    Get-ClusterNetwork -Cluster $clustername
-
-    #Verify Networking
+    #region Verify Networking
         #validate vSwitch
         Get-VMSwitch -CimSession $servers | Select-Object Name,IOV*,NetAdapterInterfaceDescriptions,ComputerName
         #validate vNICs
@@ -1330,12 +1380,210 @@ if ((Get-CimInstance -ClassName win32_computersystem -CimSession $Servers[0]).Ma
         Invoke-Command -ComputerName $servers -ScriptBlock {Get-NetAdapterQos | Where-Object enabled -eq true} | Sort-Object PSComputerName
         #Validate QOS Policies
         Get-NetQosPolicy -CimSession $servers | Sort-Object PSComputerName,Name | Select-Object PSComputerName,NetDirectPort,PriorityValue
-        #validate flow control setting
+        #validate flow control setting 
         Invoke-Command -ComputerName $servers -ScriptBlock {Get-NetQosFlowControl} | Sort-Object  -Property PSComputername,Priority | Select-Object PSComputerName,Priority,Enabled
         #validate QoS Traffic Classes
         Invoke-Command -ComputerName $servers -ScriptBlock {Get-NetQosTrafficClass} |Sort-Object PSComputerName,Name |Select-Object PSComputerName,Name,PriorityFriendly,Bandwidth
+    #endregion
 
-    #run test-netstack
-        Install-Module -Name Test-NetStack
-        test-netstack -Nodes $Servers -LogPath c:\temp\testnetstack.log -Verbose -EnableFirewallRules -ContinueOnFailure
+    #region Verify Networking with Test-RDMA
+        #download test-rdma
+        Invoke-WebRequest -Uri https://raw.githubusercontent.com/microsoft/SDN/master/Diagnostics/Test-Rdma.ps1 -OutFile $env:userprofile\Downloads\Test-Rdma.ps1
+
+        #download diskspd
+        $downloadurl="https://github.com/microsoft/diskspd/releases/download/v2.1/DiskSpd.ZIP"
+        Invoke-WebRequest -Uri $downloadurl -OutFile "$env:userprofile\Downloads\diskspd.zip"
+        #unzip
+        Expand-Archive "$env:userprofile\Downloads\diskspd.zip" -DestinationPath "$env:userprofile\Downloads\Unzip"
+        Copy-Item -Path (Get-ChildItem -Path "$env:userprofile\Downloads\Unzip\" -Recurse | Where-Object {$_.Directory -like '*amd64*' -and $_.name -eq 'diskspd.exe' }).fullname -Destination "$env:userprofile\Downloads\"
+        Remove-Item -Path "$env:userprofile\Downloads\diskspd.zip"
+        Remove-Item -Path "$env:userprofile\Downloads\Unzip" -Recurse -Force
+        
+        #distribute to nodes
+            $items="$env:userprofile\Downloads\Test-Rdma.ps1","$env:userprofile\Downloads\diskspd.exe"
+            $sessions=New-PSSession -ComputerName $Servers
+            foreach ($item in $items){
+                foreach ($Session in $Sessions){
+                    Copy-Item -Path $item -Destination $item -ToSession $Session
+                }
+            }
+        
+        #test RDMA
+            #grab connections
+            $connections = Get-SmbMultichannelConnection -CimSession $Servers -SmbInstance SBL | Group-Object PSComputerName,ClientIPAddress,ServerIPAddress,ClientInterfaceIndex | foreach-object {$_.Group | Select-Object -First 1 } | Sort-Object -Property PSComputerName,ClientIPAddress
+
+            #test each connection
+                # Temporarily enable CredSSP delegation to avoid double-hop issue
+                foreach ($Server in $servers){
+                    Enable-WSManCredSSP -Role "Client" -DelegateComputer $Server -Force
+                }
+                Invoke-Command -ComputerName $servers -ScriptBlock { Enable-WSManCredSSP Server -Force }
+
+                $password = ConvertTo-SecureString "LS1setup!" -AsPlainText -Force
+                $Credentials = New-Object System.Management.Automation.PSCredential ("CORP\LabAdmin", $password)
+
+            #test
+            foreach ($Connection in $Connections){
+                Invoke-Command -ComputerName $Connection.PSComputerName -Credential $Credentials -Authentication Credssp -ScriptBlock {
+                    Write-Host -ForegroundColor Green "$($Using:Connection.PSComputerName): $($Using:Connection.ClientIpAddress)->$($Using:Connection.ServerIpAddress)"
+                    & $env:USERPROFILE\Downloads\Test-Rdma.ps1 -IfIndex $using:Connection.ClientInterfaceIndex -IsRoCE $True -RemoteIpAddress $using:Connection.ServerIpAddress -PathToDiskspd $env:USERPROFILE\Downloads -outputlevel None
+                    Start-Sleep 10
+                }
+            }
+
+        # Disable CredSSP
+        Disable-WSManCredSSP -Role Client
+        Invoke-Command -ComputerName $Servers -ScriptBlock { Disable-WSManCredSSP Server }
+    #endregion
+
+    #region others
+        #run test-netstack
+            Install-Module -Name Test-NetStack
+            test-netstack -Nodes $Servers -LogPath c:\temp\testnetstack.log -Verbose -EnableFirewallRules -ContinueOnFailure
+        #check NetworkHUD event logs
+        $events=Invoke-Command -ComputerName $Servers -ScriptBlock {
+            Get-WinEvent -FilterHashtable @{"ProviderName"="Microsoft-Windows-Networking-NetworkHUD";StartTime=(get-date).AddMinutes(-15)}
+        }
+        $events | Format-Table -AutoSize
+
+        #check NetworkATC event logs
+        $events=Invoke-Command -ComputerName $Servers -ScriptBlock {
+            Get-WinEvent -FilterHashtable @{"ProviderName"="Microsoft-Windows-Networking-NetworkATC";StartTime=(get-date).AddMinutes(-15)}
+        }
+        $events | Format-Table -AutoSize
+
+        #Check cluster networks
+        Get-ClusterNetwork -Cluster $clustername
+
+        #check last driver update status
+        Invoke-Command -ComputerName $Servers -ScriptBlock {
+            #display result
+            $json=Get-Content "C:\ProgramData\Dell\DELL System Update\dell_dup\DSU_STATUS.json" | ConvertFrom-Json
+            $output=$json.SystemUpdateStatus.updateablecomponent #| Select-Object Name,Version,Baselineversion,UpdateStatus,RebootRequired
+            Return $output
+        } | Out-GridView
+    #endregion
+
+    #region reset iDRAC NICs
+        #Variables
+            #$iDRACCredentials=Get-Credential #grab iDRAC credentials
+            $iDracUsername="LabAdmin"
+            $iDracPassword="LS1setup!"
+            $SecureStringPassword = ConvertTo-SecureString $iDracPassword -AsPlainText -Force
+            $iDRACCredentials = New-Object System.Management.Automation.PSCredential ($iDracUsername, $SecureStringPassword)
+        
+            #IP = Idrac IP Address, USBNICIP = IP Address of  that will be configured in OS to iDRAC Pass-through USB interface
+            $iDRACs=@()
+            $iDRACs+=@{IP="192.168.100.130" ; USBNICIP="169.254.11.1"}
+            $iDRACs+=@{IP="192.168.100.131" ; USBNICIP="169.254.11.3"}
+            $iDRACs+=@{IP="192.168.100.139" ; USBNICIP="169.254.11.5"}
+            $iDRACs+=@{IP="192.168.100.140" ; USBNICIP="169.254.11.7"}
+
+        #first disable NICs in IDRAC
+            #ignoring cert is needed for posh5. In 6 and newer you can just add -SkipCertificateCheck to Invoke-WebRequest
+            function Ignore-SSLCertificates {
+                $Provider = New-Object Microsoft.CSharp.CSharpCodeProvider
+                $Compiler = $Provider.CreateCompiler()
+                $Params = New-Object System.CodeDom.Compiler.CompilerParameters
+                $Params.GenerateExecutable = $False
+                $Params.GenerateInMemory = $true
+                $Params.IncludeDebugInformation = $False
+                $Params.ReferencedAssemblies.Add("System.DLL") > $null
+                $TASource=@'
+                namespace Local.ToolkitExtensions.Net.CertificatePolicy
+                {
+                    public class TrustAll : System.Net.ICertificatePolicy
+                    {
+                        public bool CheckValidationResult(System.Net.ServicePoint sp,System.Security.Cryptography.X509Certificates.X509Certificate cert, System.Net.WebRequest req, int problem)
+                        {
+                            return true;
+                        }
+                    }
+                }
+'@ 
+                $TAResults=$Provider.CompileAssemblyFromSource($Params,$TASource)
+                $TAAssembly=$TAResults.CompiledAssembly
+                $TrustAll = $TAAssembly.CreateInstance("Local.ToolkitExtensions.Net.CertificatePolicy.TrustAll")
+                [System.Net.ServicePointManager]::CertificatePolicy = $TrustAll
+            }
+            Ignore-SSLCertificates
+
+            $Headers=@{"Accept"="application/json"}
+            $ContentType='application/json'
+            #disable first
+            foreach ($iDRAC in $iDRACs){
+                $uri="https://$($idrac.IP)/redfish/v1/Managers/iDRAC.Embedded.1/Attributes"
+                $JSONBody=@{"Attributes"=@{"OS-BMC.1.AdminState"="Disabled"}} | ConvertTo-Json -Compress
+                Invoke-WebRequest -Body $JsonBody -Method Patch -ContentType $ContentType -Headers $Headers -Uri $uri -Credential $iDRACCredentials
+            }
+
+            #Then list unkwnown adapters (iDRAC NICs should be in Unknown state now)
+            $Devices=Get-PnpDevice -CimSession $Servers -Class Net | Where-Object Status -eq "Unknown" 
+            $Devices
+
+            #then clean it from registry
+            ForEach ($Device in $Devices) {
+                Write-Host "Removing $($Device.FriendlyName)" -ForegroundColor Cyan
+                $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Device.InstanceId)"
+                Invoke-Command -ComputerName $Device.PSComputerName -ScriptBlock {
+                    Get-Item $using:RemoveKey | Select-Object -ExpandProperty Property | Foreach-Object { Remove-ItemProperty -Path $using:RemoveKey -Name $_ -Verbose }
+                }
+            }
+
+            #and then re-enable
+            foreach ($iDRAC in $iDRACs){
+                $uri="https://$($idrac.IP)/redfish/v1/Managers/iDRAC.Embedded.1/Attributes"
+                $JSONBody=@{"Attributes"=@{"OS-BMC.1.UsbNicIpAddress"="$($iDRAC.USBNICIP)";"OS-BMC.1.AdminState"="Enabled"}} | ConvertTo-Json -Compress
+                Invoke-WebRequest -Body $JsonBody -Method Patch -ContentType $ContentType -Headers $Headers -Uri $uri -Credential $iDRACCredentials
+            }
+
+            #and now check how it looks like in OS
+            $Headers=@{"Accept"="application/json"}
+            $ContentType='application/json'
+            $results=@()
+            foreach ($IP in $Idracs.IP){
+                $uri="https://$IP/redfish/v1/Managers/iDRAC.Embedded.1/Attributes"
+                $Result=Invoke-RestMethod -Method Get -ContentType $ContentType -Headers $Headers -Uri $uri -Credential $iDRACCredentials
+                $uri="https://$IP/redfish/v1/Systems/System.Embedded.1/"
+                $HostName=(Invoke-RestMethod -Method Get -ContentType $ContentType -Headers $Headers -Uri $uri -Credential $iDRACCredentials).HostName
+                $IPInsideOS=(get-Netadapter -CimSession $HostName -InterfaceDescription "Remote NDIS Compatible Device" | Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Ignore).IPAddress
+                $Result.Attributes | Add-Member -NotePropertyName HostName -NotePropertyValue $HostName
+                $Result.Attributes | Add-Member -NotePropertyName IPInsideOS -NotePropertyValue $IPInsideOS
+                $results+=$Result.Attributes
+            }
+            $Results | Select-Object "HostName","CurrentIPv4.1.Address","OS-BMC.1.UsbNicIpAddress","IPInsideOS","OS-BMC.1.AdminState"
+    #endregion
+
+    #region reset pool/disks in existing cluster
+    <#
+        #disable S2D
+        Disable-ClusterS2D -CimSession $ClusterName -Confirm:0
+
+        #remove cluster disk in SDDC Group
+        Get-ClusterResource -Cluster $ClusterName | Where-Object OwnerGroup -eq "SDDC Group" | Remove-clusterResource -Force
+        #remove cluster disk from available storage
+        Get-ClusterResource -Cluster $ClusterName | Where-Object OwnerGroup -eq "Available Storage" | Remove-clusterResource -Force
+        #remove Storage Pool from cluster resources
+        Get-ClusterResource -Cluster $ClusterName | Where-Object resourcetype -eq "Storage Pool" | Remove-ClusterResource -Force
+        #remove storage pool
+        Start-Sleep 5
+        Get-StoragePool -CimSession $ClusterName -FriendlyName S2D* | Set-StoragePool -IsReadOnly $False
+        Get-StoragePool -FriendlyName S2D* -CimSession $ClusterName | Get-VirtualDisk | Remove-VirtualDisk -Confirm:0
+        Get-StoragePool -FriendlyName S2D* -CimSession $ClusterName | Remove-StoragePool -Confirm:0
+        #wipe disks
+        Invoke-Command -ComputerName $Servers -ScriptBlock {
+            Get-PhysicalDisk -CanPool $True | Reset-PhysicalDisk
+        }
+        Enable-ClusterS2D -CimSession $ClusterName -Confirm:0 -Verbose
+    #>
+    #endregion
+
+    #region reset health service/performance history
+    <#
+        #delete performance history including volume (without invoking it returned error "get-srpartnership : The WS-Management service cannot process the request. The CIM namespace")
+        Invoke-Command -ComputerName $CLusterName -ScriptBlock {Stop-ClusterPerformanceHistory -DeleteHistory}
+        #recreate performance history
+        Start-ClusterPerformanceHistory -CimSession $ClusterName
+    #>
+    #endregion
 #endregion
